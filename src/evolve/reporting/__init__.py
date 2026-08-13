@@ -60,7 +60,7 @@ class CampaignReportProjector:
             raise ContractViolation("campaign report receipt identity mismatch")
         counts = Counter(str(row.classification) for row in claim_rows)
         cost = sum(
-            float(row.payload.get("estimated_cost_cny", 0))
+            float(row.payload.get("cost_cny", 0))
             for row in receipt_rows
             if row.kind == "cost"
         )

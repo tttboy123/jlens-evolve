@@ -94,7 +94,7 @@ def test_report_is_rebuilt_from_receipts_and_claims_without_hand_counts(
             sequence=2,
             kind="cost",
             created_at="2026-08-14T00:00:01Z",
-            payload={"estimated_cost_cny": 0.25},
+            payload={"cost_cny": 0.25},
             artifact_sha256=SHA,
         ),
     ]
