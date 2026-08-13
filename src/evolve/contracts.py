@@ -1,0 +1,291 @@
+"""Frozen cross-module contracts for v3.
+
+These value objects are the only types shared by Kernel, Runtime, Observer,
+Strategy, Registry, Governance, and Reporting modules.  Strategy-specific terms
+such as baseline/taught remain opaque strings to the neutral Kernel and Runtime.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import json
+import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any, Mapping
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+class ContractViolation(ValueError):
+    """A caller supplied data that would break an audit or safety invariant."""
+
+
+class Cohort(StrEnum):
+    FEEDBACK = "feedback"
+    HOLDOUT = "holdout"
+    FINAL_SEALED = "final-sealed"
+    BURNED = "burned"
+
+
+class ClaimGrade(StrEnum):
+    E0 = "E0"
+    E1 = "E1"
+    E2 = "E2"
+    E3 = "E3"
+
+
+class ClaimClassification(StrEnum):
+    GAIN = "gain"
+    NEUTRAL = "neutral"
+    REGRESSION = "regression"
+    INFRA_FAILURE = "infra_failure"
+
+
+def _require_text(name: str, value: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ContractViolation(f"{name} must be non-empty text")
+
+
+def _require_sha256(name: str, value: str) -> None:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ContractViolation(f"{name} must be a literal lowercase SHA-256")
+
+
+def _jsonable(value: Any) -> Any:
+    if dataclasses.is_dataclass(value):
+        return {
+            field.name: _jsonable(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+            if field.name != "content_sha256"
+        }
+    if isinstance(value, StrEnum):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in sorted(value.items())}
+    if isinstance(value, (tuple, list)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def canonical_json(value: Any) -> str:
+    """Return the stable representation used by every content hash."""
+
+    return json.dumps(
+        _jsonable(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def content_sha256(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRevision:
+    task_id: str
+    revision_id: str
+    project: str
+    cohort: Cohort
+    source_sha256: str
+    evaluator_id: str
+    source_uri: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("task_id", "revision_id", "project", "evaluator_id"):
+            _require_text(name, getattr(self, name))
+        _require_sha256("source_sha256", self.source_sha256)
+        if self.cohort is Cohort.BURNED:
+            raise ContractViolation("burned task revisions cannot enter execution")
+
+    @property
+    def content_sha256(self) -> str:
+        return content_sha256(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ModelIdentity:
+    provider: str
+    model: str
+    revision: str
+
+    def __post_init__(self) -> None:
+        for name in ("provider", "model", "revision"):
+            _require_text(name, getattr(self, name))
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionLimits:
+    max_tokens: int
+    max_seconds: int
+    max_cost_cny: float
+
+    def __post_init__(self) -> None:
+        if self.max_tokens < 0 or self.max_seconds <= 0 or self.max_cost_cny < 0:
+            raise ContractViolation("execution limits must be non-negative and bounded")
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionPlan:
+    plan_id: str
+    campaign_id: str
+    strategy_id: str
+    task: TaskRevision
+    candidate_revision_id: str
+    arm: str
+    model: ModelIdentity
+    context_policy_id: str
+    tool_policy_id: str
+    observer_policy_ids: tuple[str, ...]
+    native_evaluator_id: str
+    limits: ExecutionLimits
+    holdout_scope: str
+    metadata: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for name in (
+            "plan_id",
+            "campaign_id",
+            "strategy_id",
+            "candidate_revision_id",
+            "arm",
+            "context_policy_id",
+            "tool_policy_id",
+            "native_evaluator_id",
+            "holdout_scope",
+        ):
+            _require_text(name, getattr(self, name))
+        if not self.observer_policy_ids:
+            raise ContractViolation("observer_policy_ids must not be empty")
+        if (
+            self.task.cohort is not Cohort.FEEDBACK
+            and self.holdout_scope == "feedback-only"
+        ):
+            raise ContractViolation(
+                "feedback-only plan cannot reference a non-feedback task"
+            )
+
+    @property
+    def content_sha256(self) -> str:
+        return content_sha256(self)
+
+
+@dataclass(frozen=True, slots=True)
+class Authorization:
+    authorization_id: str
+    campaign_id: str
+    allowed_cohorts: tuple[Cohort, ...]
+    max_cost_cny: float
+    max_model_calls: int
+    expires_at: datetime
+    remote_calls_allowed: bool
+
+    def __post_init__(self) -> None:
+        _require_text("authorization_id", self.authorization_id)
+        _require_text("campaign_id", self.campaign_id)
+        if not self.allowed_cohorts:
+            raise ContractViolation("allowed_cohorts must not be empty")
+        if (
+            Cohort.BURNED in self.allowed_cohorts
+            or Cohort.FINAL_SEALED in self.allowed_cohorts
+        ):
+            raise ContractViolation(
+                "burned/final-sealed cohorts cannot be authorized here"
+            )
+        if self.max_cost_cny < 0 or self.max_model_calls < 0:
+            raise ContractViolation("authorization budgets must be non-negative")
+        if self.expires_at.tzinfo is None:
+            raise ContractViolation("expires_at must be timezone-aware")
+
+    def assert_allows(
+        self,
+        *,
+        cohort: Cohort,
+        reserved_cost_cny: float,
+        reserved_model_calls: int,
+        remote: bool,
+        now: datetime | None = None,
+    ) -> None:
+        checked_at = now or datetime.now(UTC)
+        if checked_at >= self.expires_at:
+            raise ContractViolation("authorization expired")
+        if cohort not in self.allowed_cohorts:
+            raise ContractViolation(f"cohort {cohort} is not authorized")
+        if reserved_cost_cny > self.max_cost_cny:
+            raise ContractViolation("cost budget exceeded")
+        if reserved_model_calls > self.max_model_calls:
+            raise ContractViolation("model call budget exceeded")
+        if remote and not self.remote_calls_allowed:
+            raise ContractViolation("remote calls are not authorized")
+
+
+@dataclass(frozen=True, slots=True)
+class Receipt:
+    receipt_id: str
+    campaign_id: str
+    plan_id: str
+    sequence: int
+    kind: str
+    created_at: str
+    payload: Mapping[str, Any]
+    artifact_sha256: str
+    supersedes_receipt_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("receipt_id", "campaign_id", "plan_id", "kind", "created_at"):
+            _require_text(name, getattr(self, name))
+        if self.sequence < 1:
+            raise ContractViolation("receipt sequence must start at one")
+        _require_sha256("artifact_sha256", self.artifact_sha256)
+
+    @property
+    def content_sha256(self) -> str:
+        return content_sha256(self)
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceEnvelope:
+    evidence_id: str
+    receipt_ids: tuple[str, ...]
+    observer_id: str
+    grade: ClaimGrade
+    payload: Mapping[str, Any]
+    artifact_sha256: str
+
+    def __post_init__(self) -> None:
+        _require_text("evidence_id", self.evidence_id)
+        _require_text("observer_id", self.observer_id)
+        if not self.receipt_ids:
+            raise ContractViolation("evidence must reference at least one receipt")
+        _require_sha256("artifact_sha256", self.artifact_sha256)
+
+    @property
+    def content_sha256(self) -> str:
+        return content_sha256(self)
+
+
+@dataclass(frozen=True, slots=True)
+class Claim:
+    claim_id: str
+    candidate_id: str
+    grade: ClaimGrade
+    classification: ClaimClassification
+    evidence_ids: tuple[str, ...]
+    rationale: str
+    supersedes_claim_id: str | None
+
+    def __post_init__(self) -> None:
+        _require_text("claim_id", self.claim_id)
+        _require_text("candidate_id", self.candidate_id)
+        _require_text("rationale", self.rationale)
+        if not self.evidence_ids:
+            raise ContractViolation("claim must reference evidence")
+
+    @property
+    def content_sha256(self) -> str:
+        return content_sha256(self)

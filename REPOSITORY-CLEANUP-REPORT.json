@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "deleted_files": [],
+  "deleted_functions": [],
+  "kept_authorities": ["src/evolve"],
+  "compatibility_files": [
+    "src/evolve/strategies/legacy_import.py",
+    "src/evolve/strategies/skill_paired.py",
+    "src/evolve/strategies/agent_program.py"
+  ],
+  "deprecated_external_repository": "/Users/lune/Documents/Codex/2026-07-18/bang/work/evolve-jlens-cluster",
+  "generated_exclusions": ["__pycache__", ".pytest_cache", ".ruff_cache", "runs"],
+  "immutable_evidence_deleted": false,
+  "known_deferred_deletion": "Legacy schema readers remain until semantic replay equivalence is independently verified."
+}
