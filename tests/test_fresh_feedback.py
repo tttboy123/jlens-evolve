@@ -10,6 +10,7 @@ import pytest
 from evolve.contracts import ContractViolation
 from evolve.fresh_feedback import (
     _build_tasks,
+    _launcher,
     _load_config,
     _require_clean_head,
     seal_run,
@@ -108,3 +109,12 @@ def test_release_identity_rejects_a_dirty_worktree(tmp_path: Path) -> None:
 
     with pytest.raises(ContractViolation, match="clean committed HEAD"):
         _require_clean_head(source)
+
+
+def test_python_launcher_preserves_venv_symlink(tmp_path: Path) -> None:
+    target = tmp_path / "python-real"
+    target.write_text("binary", encoding="utf-8")
+    launcher = tmp_path / "venv-python"
+    launcher.symlink_to(target)
+
+    assert _launcher({"python": str(launcher)}, "python") == launcher.absolute()

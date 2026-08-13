@@ -120,6 +120,16 @@ def _path(config: Mapping[str, Any], name: str) -> Path:
     return result
 
 
+def _launcher(config: Mapping[str, Any], name: str) -> Path:
+    value = config.get(name)
+    if not isinstance(value, str) or not value:
+        raise ContractViolation(f"fresh feedback launcher is missing: {name}")
+    result = Path(value).expanduser().absolute()
+    if not result.is_file():
+        raise ContractViolation(f"fresh feedback launcher is missing: {name}")
+    return result
+
+
 def _model_identity(model_path: Path) -> tuple[ModelIdentity, dict[str, str]]:
     hashes = {}
     for name in _MODEL_IDENTITY_FILES:
@@ -234,8 +244,8 @@ def _freeze_harness(config: Mapping[str, Any], output_root: Path) -> Path:
     try:
         module = importlib.import_module("official_patch_evaluator")
         receipt = module.freeze_official_harness_runtime(
-            swe_python=_path(config, "swe_python"),
-            multi_python=_path(config, "multi_python"),
+            swe_python=_launcher(config, "swe_python"),
+            multi_python=_launcher(config, "multi_python"),
             swe_harness_root=_path(config, "swe_harness_root"),
             multi_harness_root=_path(config, "multi_harness_root"),
             output_root=output_root / "harness-runtime",
@@ -391,8 +401,8 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
     evaluator = LegacyOfficialNativeEvaluator(
         evaluator_id=evaluator_id,
         legacy_root=legacy_root,
-        swe_python=_path(config, "swe_python"),
-        multi_python=_path(config, "multi_python"),
+        swe_python=_launcher(config, "swe_python"),
+        multi_python=_launcher(config, "multi_python"),
         swe_harness_root=swe_harness_root,
         multi_harness_root=multi_harness_root,
         pool_root=pool_root,
