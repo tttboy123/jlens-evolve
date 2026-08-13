@@ -10,7 +10,24 @@ python3 -m pytest -q
 PYTHONPATH=src python3 -m evolve --help
 ```
 
-The v3 vertical slice imports three real feedback-only matched native pairs from
-the read-only v2.5 evidence repository. It does not open holdout or retrain models.
-See `docs/MIGRATION-v3.md` for compatibility boundaries.
+The product entry point can execute a fresh three-task, six-arm feedback campaign:
 
+```bash
+PYTHONPATH=src /path/to/legacy/.venv/bin/python -m evolve fresh-feedback-e2e \
+  --config /absolute/path/to/FRESH-FEEDBACK-CONFIG.json \
+  --output /absolute/path/to/run
+PYTHONPATH=src python3 -m evolve verify-manifest \
+  --manifest /absolute/path/to/run/EVIDENCE-MANIFEST.json \
+  --root /absolute/path/to/run
+```
+
+That command is the sole live orchestration entry. It validates three clean,
+revision-pinned feedback checkouts; freezes the local Qwen and official evaluator
+identities; dispatches baseline/taught generation and native evaluation only via
+`ExecutionRuntime`; projects external-trace, native and cost evidence; classifies
+matched pairs; and records the resulting candidate/capability as inactive. A
+frozen real Teacher receipt may be replayed, but it is never allowed to promote a
+candidate. It does not open holdout, retrain model weights or mutate legacy data.
+
+`legacy-feedback-e2e` remains available only as a historical evidence-import
+compatibility command. See `docs/MIGRATION-v3.md` for authority boundaries.

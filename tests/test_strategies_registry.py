@@ -117,6 +117,33 @@ def test_matched_pair_rejects_generation_config_drift() -> None:
         SkillPairedStrategy.validate_matched_pair(baseline, mismatched)
 
 
+def test_skill_paired_strategy_preserves_frozen_task_execution_metadata() -> None:
+    metadata = {
+        "base_revision": "1" * 40,
+        "benchmark_id": "swe-bench-verified",
+        "instance_id": "django__django-13794",
+    }
+
+    baseline, taught = SkillPairedStrategy().build_plans(
+        campaign_id="campaign-1",
+        task=task(),
+        baseline_revision_id="baseline-r1",
+        taught_revision_id="skill-r2",
+        model=model(),
+        context_policy_id="context-r1",
+        tool_policy_id="tools-r1",
+        observer_policy_ids=("native",),
+        limits=limits(),
+        generation_config={"temperature": 0},
+        plan_metadata=metadata,
+    )
+
+    assert baseline.metadata == taught.metadata == {
+        **metadata,
+        "generation_config": {"temperature": 0},
+    }
+
+
 @pytest.mark.parametrize(
     ("changed_field", "expected_name"),
     [

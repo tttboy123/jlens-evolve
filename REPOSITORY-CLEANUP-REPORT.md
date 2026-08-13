@@ -3,7 +3,8 @@
 ## Inventory and classification
 
 - keep: `src/evolve/**`, tests, architecture and migration documentation.
-- compatibility: the three Strategy adapters and legacy evidence importer.
+- compatibility: the three Strategy adapters, historical evidence importer,
+  `LegacyQwenCellRunner`, and `LegacyOfficialNativeEvaluator`.
 - deprecated: historical execution authorities remain only in the separate,
   read-only v2.5 repository; none were copied into this v3 repository.
 - delete-now: no source file qualified after reference and public-interface audit.
@@ -12,16 +13,24 @@
 
 ## Cleanup action
 
-No project source was deleted. This repository began as an architecture-only Git
-worktree, so v3 was implemented once behind a single formal entry point instead of
-copying legacy implementations. The cleanup therefore consisted of excluding
-rebuildable cache/run products and documenting the compatibility boundary.
+No project source qualified for deletion. Import/reference, CLI, test, dynamic
+adapter and historical-replay audits found one authority for each v3 product
+responsibility. The legacy Qwen and official-harness implementations are reached
+only through narrow Runtime adapters; they were not copied. Empty stubs and
+duplicate Campaign, Runtime, Transport, Evaluator, Budget, Catalog or Registry
+authorities were not found. Rebuildable cache/run products remain ignored.
+
+Post-cleanup inventory: 36 source Python files, 10 test Python files, and 7,415
+Python lines before final formatting (informational only). The pre-extension Git
+revision contained 48 tracked files; this extension adds the bounded live adapters,
+orchestrator and their contract tests without adding a duplicate authority.
 
 ## Verification
 
-Pre-cleanup and post-cleanup test results are recorded under the final run's raw
-test outputs. Historical immutable evidence, manifests, reviews, registries and
-cost ledgers were not modified or deleted.
+Post-cleanup verification covers import/compile, targeted tests, the full suite,
+Ruff, Git diff checks, the live campaign and manifest replay. Raw final-HEAD
+outputs are stored under the final run. Historical immutable evidence, manifests,
+reviews, registries and cost ledgers were not modified or deleted.
 
 ## Deferred deletion
 

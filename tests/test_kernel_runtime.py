@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 
@@ -303,10 +304,11 @@ def test_execution_runtime_is_the_single_entry_and_replays_finalized_receipts() 
     assert second.status == "completed"
     assert second.replayed is True
     assert workspace.calls == transport.calls == evaluator.calls == 1
-    assert observer.calls == 4
+    assert observer.calls == 5
     assert [receipt.kind for receipt in first.receipts] == [
         "workspace",
         "model",
+        "external_trace",
         "cost",
         "native_evaluation",
         "execution_terminal",
@@ -326,6 +328,43 @@ def test_execution_runtime_is_the_single_entry_and_replays_finalized_receipts() 
     assert native.payload["evaluator_error"] is None
 
 
+def test_terminal_replay_rejects_a_different_plan_with_the_same_id() -> None:
+    runtime, _, _, _, _, _ = runtime_fixture()
+    original = plan(plan_id="shared-plan")
+    assert runtime.execute(original, authorization()).status == "completed"
+
+    with pytest.raises(ContractViolation, match="plan identity"):
+        runtime.execute(
+            replace(original, candidate_revision_id="different-candidate"),
+            authorization(),
+        )
+
+
+def test_runtime_projects_model_dispatch_as_external_trace_receipt() -> None:
+    runtime, _, _, _, _, _ = runtime_fixture()
+
+    result = runtime.execute(plan(), authorization())
+
+    trace = next(
+        receipt for receipt in result.receipts if receipt.kind == "external_trace"
+    )
+    model = next(receipt for receipt in result.receipts if receipt.kind == "model")
+    assert trace.payload["model_receipt_id"] == model.receipt_id
+    assert trace.payload["model_artifact_sha256"] == model.artifact_sha256
+
+
+def test_runtime_rejects_ambiguous_duplicate_stage_receipts() -> None:
+    sink = MemoryReceiptSink()
+    runtime, _, _, _, _, _ = runtime_fixture(sink=sink)
+    frozen_plan = plan()
+    completed = runtime.execute(frozen_plan, authorization())
+    model = next(receipt for receipt in completed.receipts if receipt.kind == "model")
+    sink.receipts.insert(2, replace(model, receipt_id="duplicate-model", sequence=3))
+
+    with pytest.raises(ContractViolation, match="duplicate model"):
+        runtime.execute(frozen_plan, authorization())
+
+
 def test_execution_runtime_records_infrastructure_error_without_claiming_result() -> (
     None
 ):
@@ -336,7 +375,7 @@ def test_execution_runtime_records_infrastructure_error_without_claiming_result(
 
     assert result.status == "infra_failure"
     assert transport.calls == evaluator.calls == 1
-    assert observer.calls == 4
+    assert observer.calls == 5
     assert result.receipts[-2].kind == "native_evaluation"
     assert result.receipts[-2].payload["resolved"] is False
     assert result.receipts[-2].payload["evaluator_error"] == (
@@ -369,7 +408,7 @@ def test_execution_runtime_partial_receipt_resumes_without_repeating_completed_s
     assert completed.status == "completed"
     assert resumed_workspace.calls == 0
     assert healthy_transport.calls == evaluator.calls == 1
-    assert observer.calls == 3
+    assert observer.calls == 4
     assert len([item for item in sink.receipts if item.kind == "workspace"]) == 1
 
 
@@ -391,7 +430,7 @@ def test_execution_runtime_stops_before_native_when_actual_cost_exceeds_plan() -
 
     assert result.status == "budget_exhausted"
     assert evaluator.calls == 0
-    assert observer.calls == 3
+    assert observer.calls == 4
     assert result.receipts[-1].kind == "execution_terminal"
     assert result.receipts[-1].payload["status"] == "budget_exhausted"
 

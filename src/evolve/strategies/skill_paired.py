@@ -34,12 +34,17 @@ class SkillPairedStrategy:
         observer_policy_ids: tuple[str, ...],
         limits: ExecutionLimits,
         generation_config: Mapping[str, Any] | None = None,
+        plan_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[ExecutionPlan, ExecutionPlan]:
         if task.cohort is not Cohort.FEEDBACK:
             raise StrategyViolation(
                 "Skill paired plans are restricted to feedback tasks"
             )
         generation = dict(generation_config or {})
+        metadata = dict(plan_metadata or {})
+        if "generation_config" in metadata:
+            raise StrategyViolation("plan_metadata cannot replace generation_config")
+        metadata["generation_config"] = generation
         common = {
             "campaign_id": campaign_id,
             "strategy_id": self.strategy_id,
@@ -59,7 +64,7 @@ class SkillPairedStrategy:
                 ),
                 candidate_revision_id=candidate_revision_id,
                 arm=arm,
-                metadata={"generation_config": generation},
+                metadata=metadata,
                 **common,
             )
             for arm, candidate_revision_id in (
@@ -94,10 +99,12 @@ class SkillPairedStrategy:
         for field in invariant_fields:
             if getattr(baseline, field) != getattr(taught, field):
                 raise StrategyViolation(f"matched invariant differs: {field}")
-        baseline_generation = baseline.metadata.get("generation_config")
-        taught_generation = taught.metadata.get("generation_config")
-        if baseline_generation != taught_generation:
-            raise StrategyViolation("matched invariant differs: generation_config")
+        if baseline.metadata != taught.metadata:
+            if baseline.metadata.get("generation_config") != taught.metadata.get(
+                "generation_config"
+            ):
+                raise StrategyViolation("matched invariant differs: generation_config")
+            raise StrategyViolation("matched invariant differs: plan_metadata")
         if baseline.task.cohort is not Cohort.FEEDBACK:
             raise StrategyViolation("matched pair must use a feedback task")
 

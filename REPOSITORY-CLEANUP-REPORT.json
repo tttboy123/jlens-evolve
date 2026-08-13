@@ -6,10 +6,19 @@
   "compatibility_files": [
     "src/evolve/strategies/legacy_import.py",
     "src/evolve/strategies/skill_paired.py",
-    "src/evolve/strategies/agent_program.py"
+    "src/evolve/strategies/agent_program.py",
+    "src/evolve/runtime/qwen_transport.py",
+    "src/evolve/runtime/live_adapters.py"
   ],
   "deprecated_external_repository": "/Users/lune/Documents/Codex/2026-07-18/bang/work/evolve-jlens-cluster",
   "generated_exclusions": ["__pycache__", ".pytest_cache", ".ruff_cache", "runs"],
   "immutable_evidence_deleted": false,
+  "duplicate_authorities_found": false,
+  "unused_v3_stubs_found": false,
+  "post_cleanup_inventory": {
+    "source_python_files": 36,
+    "test_python_files": 10,
+    "python_lines": 7415
+  },
   "known_deferred_deletion": "Legacy schema readers remain until semantic replay equivalence is independently verified."
 }

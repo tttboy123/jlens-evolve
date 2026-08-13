@@ -71,19 +71,39 @@ class ExecutionRuntime:
                 key=lambda item: item.sequence,
             )
         )
+        for singleton_kind in (
+            "workspace",
+            "model",
+            "external_trace",
+            "cost",
+            "native_evaluation",
+            "execution_terminal",
+        ):
+            if sum(item.kind == singleton_kind for item in existing) > 1:
+                raise ContractViolation(
+                    f"resume contains duplicate {singleton_kind} receipts"
+                )
+        self._validate_admission(plan, authorization)
         terminal = next(
             (item for item in reversed(existing) if item.kind == "execution_terminal"),
             None,
         )
         if terminal is not None:
+            workspace_receipt = next(
+                (item for item in existing if item.kind == "workspace"), None
+            )
+            if (
+                workspace_receipt is None
+                or workspace_receipt.payload.get("plan_sha256")
+                != plan.content_sha256
+            ):
+                raise ContractViolation("terminal replay plan identity mismatch")
             return ExecutionResult(
                 status=str(terminal.payload["status"]),
                 receipts=existing,
                 evidence=(),
                 replayed=True,
             )
-
-        self._validate_admission(plan, authorization)
         appender = _ReceiptAppender(
             plan=plan,
             sink=self._receipt_sink,
@@ -117,6 +137,33 @@ class ExecutionRuntime:
                 )
                 model_receipt = appender.append_fact("model", model_payload)
             model_output = model_receipt.payload
+
+            trace_receipt = existing_by_kind.get("external_trace")
+            if trace_receipt is None:
+                trace_payload = {
+                    "model_receipt_id": model_receipt.receipt_id,
+                    "model_artifact_sha256": model_receipt.artifact_sha256,
+                    "arm": plan.arm,
+                    "task_revision_id": plan.task.revision_id,
+                }
+                for name in (
+                    "raw_output_path",
+                    "raw_output_sha256",
+                    "prompt_paths",
+                    "prompt_sha256",
+                    "structural_valid",
+                    "failure_reason",
+                    "mechanism",
+                    "condition_id",
+                ):
+                    if name in model_output:
+                        trace_payload[name] = model_output[name]
+                appender.append_fact("external_trace", trace_payload)
+            elif (
+                trace_receipt.payload.get("model_receipt_id")
+                != model_receipt.receipt_id
+            ):
+                raise ContractViolation("resume external trace identity mismatch")
 
             cost_receipt = existing_by_kind.get("cost")
             if cost_receipt is None:

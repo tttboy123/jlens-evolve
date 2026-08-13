@@ -19,6 +19,7 @@ from evolve.contracts import (
     canonical_json,
 )
 from evolve.evidence import ClaimEngine, EvidenceGraph, ReceiptStore
+from evolve.fresh_feedback import run_fresh_feedback_e2e, seal_run
 from evolve.observers import NativeOutcomeObserver, ObserverHub
 from evolve.registry import CapabilityRecord, CapabilityRegistry
 from evolve.reporting import AuditVerifier, CampaignReportProjector
@@ -205,6 +206,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--output", type=Path, required=True)
     run.add_argument("--teacher-receipt", type=Path, required=True)
     run.add_argument("--qwen-receipt", type=Path, required=True)
+    fresh = sub.add_parser("fresh-feedback-e2e")
+    fresh.add_argument("--config", type=Path, required=True)
+    fresh.add_argument("--output", type=Path, required=True)
+    seal = sub.add_parser("seal-run")
+    seal.add_argument("--root", type=Path, required=True)
     verify = sub.add_parser("verify-manifest")
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--root", type=Path, required=True)
@@ -218,6 +224,16 @@ def main(argv: list[str] | None = None) -> int:
             qwen_receipt=args.qwen_receipt.resolve(),
         )
         print(canonical_json(report))
+        return 0
+    if args.command == "fresh-feedback-e2e":
+        result = run_fresh_feedback_e2e(
+            config_path=args.config.resolve(), output_root=args.output.resolve()
+        )
+        print(canonical_json(result))
+        return 0
+    if args.command == "seal-run":
+        count = seal_run(args.root.resolve())
+        print(f"sealed and verified {count} manifest entries")
         return 0
     count = AuditVerifier().verify_manifest(args.manifest.resolve(), root=args.root)
     print(f"verified {count} manifest entries")
