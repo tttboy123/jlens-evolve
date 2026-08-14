@@ -8,3 +8,4 @@ dist/
 *.egg-info/
 runs/
 
+tests/.DS_Store
