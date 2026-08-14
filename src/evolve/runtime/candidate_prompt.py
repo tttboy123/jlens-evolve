@@ -37,6 +37,7 @@ def compiled_candidate_prompt(compiled: CompiledRevision, task_id: str) -> str:
         {
             "candidate_id": compiled.change_set.candidate_id,
             "revision_id": compiled.change_set.revision_id,
+            "bundle_sha256": compiled.bundle_sha256,
             "protocol": compiled.skill.protocol,
             "prompt_template": compiled.skill.prompt_template,
             "skill_text": compiled.skill.skill_text,
@@ -82,9 +83,13 @@ class CandidatePromptTransport:
                     "candidate_consumed": False,
                     "candidate_bundle_sha256": None,
                     "candidate_revision_id": None,
-                    "prompt_sha256": hashlib.sha256(
-                        base_prompt.encode("utf-8")
-                    ).hexdigest(),
+                    "prompt_texts": [base_prompt],
+                    "prompt_sha256": [
+                        hashlib.sha256(base_prompt.encode("utf-8")).hexdigest()
+                    ],
+                    "candidate_prompt": None,
+                    "candidate_prompt_sha256": None,
+                    "compiled_artifact_sha256": {},
                 }
             )
             return output
@@ -111,7 +116,12 @@ class CandidatePromptTransport:
                 "candidate_bundle_sha256": compiled.bundle_sha256,
                 "candidate_revision_id": compiled.change_set.revision_id,
                 "compiled_artifact_sha256": dict(compiled.artifact_sha256),
-                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "prompt_texts": [prompt],
+                "prompt_sha256": [hashlib.sha256(prompt.encode("utf-8")).hexdigest()],
+                "candidate_prompt": candidate_prompt,
+                "candidate_prompt_sha256": hashlib.sha256(
+                    candidate_prompt.encode("utf-8")
+                ).hexdigest(),
             }
         )
         return output

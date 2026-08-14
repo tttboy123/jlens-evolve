@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 from evolve.contracts import (
     Claim,
@@ -13,6 +13,7 @@ from evolve.contracts import (
     ClaimGrade,
     ContractViolation,
     EvidenceEnvelope,
+    Receipt,
 )
 
 from .evidence_graph import EvidenceGraph
@@ -51,6 +52,16 @@ class TrustedObserverVerifier(Protocol):
     """Process-local trust root for independently produced observations."""
 
     def verify_evidence(self, envelope: EvidenceEnvelope) -> bool: ...
+
+    def verify_receipt_lineage(
+        self,
+        *,
+        envelope: EvidenceEnvelope,
+        observation_receipt: Receipt,
+        prediction_receipt: Receipt,
+        model_receipt: Receipt,
+        artifact_reader: Callable[[str], bytes],
+    ) -> bool: ...
 
 
 class EvidenceGradeMachine:
@@ -140,6 +151,14 @@ class EvidenceGradeMachine:
         classification = _aggregate_classification(counts)
         task_count = len(claims_by_task)
         project_count = len(projects)
+        receipts_by_id = (
+            {
+                receipt.receipt_id: receipt
+                for receipt in self._receipt_store.list_receipts()
+            }
+            if self._receipt_store is not None
+            else {}
+        )
         prediction_evidence_by_task = {
             task_id: _task_prediction_evidence(
                 tuple(evidence.values()),
@@ -147,6 +166,12 @@ class EvidenceGradeMachine:
                 mechanism_id=mechanism_id,
                 claim_evidence_ids=claims_by_task[task_id].evidence_ids,
                 trusted_observer_verifier=self._trusted_observer_verifier,
+                receipts_by_id=receipts_by_id,
+                artifact_reader=(
+                    self._receipt_store.read_artifact
+                    if self._receipt_store is not None
+                    else None
+                ),
             )
             for task_id in claims_by_task
         }
@@ -247,11 +272,14 @@ def _task_prediction_evidence(
     mechanism_id: str | None,
     claim_evidence_ids: tuple[str, ...],
     trusted_observer_verifier: TrustedObserverVerifier | None,
+    receipts_by_id: Mapping[str, Receipt],
+    artifact_reader: Callable[[str], bytes] | None,
 ) -> tuple[str, ...]:
     if (
         not isinstance(mechanism_id, str)
         or not mechanism_id.strip()
         or trusted_observer_verifier is None
+        or artifact_reader is None
     ):
         return ()
     native_rows = [
@@ -273,6 +301,8 @@ def _task_prediction_evidence(
     if {row.payload.get("arm") for row in native_rows} != {"baseline", "taught"}:
         return ()
     evidence_ids: list[str] = []
+    expected_effect_sha256: str | None = None
+    prediction_candidate_revision_id: str | None = None
     for plan_id in sorted(plan_ids):
         native = [row for row in native_rows if row.payload.get("plan_id") == plan_id]
         external = [
@@ -305,6 +335,69 @@ def _task_prediction_evidence(
             row.payload.get("prediction_sha256") != target
             for row in (*external, *internal)
         ):
+            return ()
+        internal_row = internal[0]
+        if len(internal_row.receipt_ids) != 1:
+            return ()
+        observation_receipt = receipts_by_id.get(internal_row.receipt_ids[0])
+        prediction_receipt_id = internal_row.payload.get(
+            "mechanism_prediction_receipt_id"
+        )
+        model_receipt_id = internal_row.payload.get("model_receipt_id")
+        if (
+            observation_receipt is None
+            or not isinstance(prediction_receipt_id, str)
+            or not isinstance(model_receipt_id, str)
+        ):
+            return ()
+        prediction_receipt = receipts_by_id.get(prediction_receipt_id)
+        model_receipt = receipts_by_id.get(model_receipt_id)
+        if (
+            prediction_receipt is None
+            or model_receipt is None
+            or not trusted_observer_verifier.verify_receipt_lineage(
+                envelope=internal_row,
+                observation_receipt=observation_receipt,
+                prediction_receipt=prediction_receipt,
+                model_receipt=model_receipt,
+                artifact_reader=artifact_reader,
+            )
+        ):
+            return ()
+        try:
+            prediction_candidate = str(
+                prediction_receipt.payload["candidate_revision_id"]
+            )
+        except KeyError:
+            return ()
+        if prediction_candidate_revision_id is None:
+            prediction_candidate_revision_id = prediction_candidate
+        elif prediction_candidate_revision_id != prediction_candidate:
+            return ()
+        if (
+            native[0].payload.get("arm") == "taught"
+            and external[0].payload.get("candidate_revision_id") != prediction_candidate
+        ):
+            return ()
+        current_expected_effect_sha256 = internal_row.payload.get(
+            "expected_internal_effect_sha256"
+        )
+        if (
+            not _valid_sha256(current_expected_effect_sha256)
+            or not _valid_sha256(
+                internal_row.payload.get("observed_internal_effect_sha256")
+            )
+            or not _valid_sha256(internal_row.payload.get("raw_trace_sha256"))
+            or not isinstance(internal_row.payload.get("locations"), list)
+            or not internal_row.payload.get("locations")
+        ):
+            return ()
+        if expected_effect_sha256 is None:
+            expected_effect_sha256 = current_expected_effect_sha256
+        elif expected_effect_sha256 != current_expected_effect_sha256:
+            return ()
+        expected_consistency = native[0].payload.get("arm") == "taught"
+        if internal_row.payload.get("effect_consistent") is not expected_consistency:
             return ()
         evidence_ids.extend(
             (native[0].evidence_id, external[0].evidence_id, internal[0].evidence_id)

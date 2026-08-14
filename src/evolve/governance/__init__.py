@@ -41,9 +41,7 @@ class GovernanceService:
     registries' ordinary candidate-writing interface.
     """
 
-    def __init__(
-        self, *, authority: GovernanceDecisionAuthority | None = None
-    ) -> None:
+    def __init__(self, *, authority: GovernanceDecisionAuthority | None = None) -> None:
         self._authority = authority
 
     def evaluate(
@@ -109,6 +107,10 @@ class GovernanceService:
             evidence_grade=evidence.grade,
         )
         rationale = f"{gate}: {evidence.rationale}"
+        evidence_state_sha256 = content_sha256(evidence)
+        authority_key_id = (
+            self._authority.key_id if self._authority is not None else None
+        )
         identity_payload = {
             "candidate_id": candidate.candidate_id,
             "candidate_revision_id": candidate.revision_id,
@@ -119,10 +121,8 @@ class GovernanceService:
             "human_approval": human_approval,
             "decided_at": decided_at,
             "rationale": rationale,
-            "evidence_state_sha256": content_sha256(evidence),
-            "authority_key_id": (
-                self._authority.key_id if self._authority is not None else None
-            ),
+            "evidence_state_sha256": evidence_state_sha256,
+            "authority_key_id": authority_key_id,
         }
         decision = PromotionDecision(
             decision_id=decision_identity(identity_payload),
@@ -135,8 +135,8 @@ class GovernanceService:
             human_approval=human_approval,
             decided_at=decided_at,
             rationale=rationale,
-            evidence_state_sha256=identity_payload["evidence_state_sha256"],
-            authority_key_id=identity_payload["authority_key_id"],
+            evidence_state_sha256=evidence_state_sha256,
+            authority_key_id=authority_key_id,
         )
         if gate is GateDecision.APPROVED:
             if self._authority is None:

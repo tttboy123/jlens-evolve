@@ -13,6 +13,7 @@ from evolve.contracts import (
     ContractViolation,
     ExecutionLimits,
     ExecutionPlan,
+    MechanismPrediction,
     ModelIdentity,
     Receipt,
     TaskRevision,
@@ -331,6 +332,49 @@ def test_execution_runtime_is_the_single_entry_and_replays_finalized_receipts() 
     assert native.payload["model_artifact_sha256"] == model.artifact_sha256
 
 
+def test_runtime_freezes_mechanism_prediction_before_model_dispatch() -> None:
+    sink = MemoryReceiptSink()
+    prediction = MechanismPrediction.create(
+        prediction_id="prediction-role-commitment-v1",
+        candidate_revision_id="candidate-r1",
+        mechanism_id="role-commitment-v1",
+        observer_config_sha256="b" * 64,
+        expected_internal_effect={
+            "concept": "declared-role",
+            "phase": "symbol-selection",
+            "min_final_score": 0.7,
+            "min_location_count": 2,
+            "require_non_decreasing": True,
+        },
+    )
+
+    class PredictionAwareTransport(FakeTransport):
+        def infer(self, execution_plan, workspace):
+            assert [receipt.kind for receipt in sink.receipts] == [
+                "workspace",
+                "mechanism_prediction",
+            ]
+            frozen = sink.receipts[-1]
+            assert frozen.payload == prediction.as_payload()
+            assert "mechanism_prediction" not in execution_plan.metadata
+            return super().infer(execution_plan, workspace)
+
+    runtime, _, _, _, _, _ = runtime_fixture(
+        transport=PredictionAwareTransport(), sink=sink
+    )
+    execution_plan = plan()
+
+    result = runtime.execute(
+        execution_plan,
+        authorization(),
+        mechanism_prediction=prediction,
+    )
+
+    assert result.receipts[1].kind == "mechanism_prediction"
+    model = next(receipt for receipt in result.receipts if receipt.kind == "model")
+    assert result.receipts[1].sequence < model.sequence
+
+
 def test_terminal_replay_rejects_a_different_plan_with_the_same_id() -> None:
     runtime, _, _, _, _, _ = runtime_fixture()
     original = plan(plan_id="shared-plan")
@@ -386,10 +430,7 @@ def test_execution_runtime_records_infrastructure_error_without_claiming_result(
     )
     model = next(item for item in result.receipts if item.kind == "model")
     assert result.receipts[-2].payload["model_receipt_id"] == model.receipt_id
-    assert (
-        result.receipts[-2].payload["model_artifact_sha256"]
-        == model.artifact_sha256
-    )
+    assert result.receipts[-2].payload["model_artifact_sha256"] == model.artifact_sha256
     assert result.receipts[-1].payload["status"] == "infra_failure"
 
 

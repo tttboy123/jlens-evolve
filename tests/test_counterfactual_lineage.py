@@ -44,8 +44,45 @@ def _receipt(*, arm: str, kind: str, payload: dict[str, object]) -> Receipt:
     )
 
 
-def _arm(*, arm: str, resolved: bool, candidate: bool):
+def _arm(
+    *,
+    arm: str,
+    resolved: bool,
+    candidate: bool,
+    prompt_mode: str = "valid",
+):
     prediction = _sha(f"prediction:{arm}")
+    candidate_bundle_sha256 = _sha("candidate")
+    candidate_prompt = canonical_json(
+        {
+            "candidate_revision_id": "candidate-r2",
+            "candidate_bundle_sha256": candidate_bundle_sha256,
+        }
+    )
+    prompt_text = (
+        f"SYSTEM: taught repair\nCOMPILED-CANDIDATE:\n{candidate_prompt}"
+        if candidate
+        else "SYSTEM: baseline repair"
+    )
+    if prompt_mode == "baseline-leak":
+        prompt_text = f"SYSTEM: baseline repair\n{candidate_prompt}"
+    elif prompt_mode == "taught-omission":
+        prompt_text = "SYSTEM: taught repair without compiled candidate"
+    prompt_lineage: dict[str, object] = {
+        "prompt_texts": [prompt_text],
+        "prompt_sha256": [_sha(prompt_text)],
+        "candidate_prompt": candidate_prompt if candidate else None,
+        "candidate_prompt_sha256": _sha(candidate_prompt) if candidate else None,
+        "compiled_artifact_sha256": (
+            {"COMPILED-REVISION.json": candidate_bundle_sha256} if candidate else {}
+        ),
+    }
+    if prompt_mode == "missing":
+        prompt_lineage = {}
+    external_prompt_lineage = dict(prompt_lineage)
+    if prompt_mode == "external-mismatch":
+        external_prompt_lineage["prompt_texts"] = ["forged external prompt"]
+        external_prompt_lineage["prompt_sha256"] = [_sha("forged external prompt")]
     model = _receipt(
         arm=arm,
         kind="model",
@@ -56,7 +93,8 @@ def _arm(*, arm: str, resolved: bool, candidate: bool):
             "revision": "frozen-r1",
             "candidate_consumed": candidate,
             "candidate_revision_id": "candidate-r2" if candidate else None,
-            "candidate_bundle_sha256": _sha("candidate") if candidate else None,
+            "candidate_bundle_sha256": candidate_bundle_sha256 if candidate else None,
+            **prompt_lineage,
         },
     )
     external_receipt = _receipt(
@@ -71,6 +109,7 @@ def _arm(*, arm: str, resolved: bool, candidate: bool):
             "candidate_consumed": candidate,
             "candidate_revision_id": "candidate-r2" if candidate else None,
             "candidate_bundle_sha256": _sha("candidate") if candidate else None,
+            **external_prompt_lineage,
         },
     )
     native_receipt = _receipt(
@@ -113,6 +152,47 @@ def _arm(*, arm: str, resolved: bool, candidate: bool):
         native_receipt,
         evidence(native_receipt, "native-v1", ClaimGrade.E1),
     )
+
+
+@pytest.mark.parametrize(
+    ("arm", "candidate", "prompt_mode"),
+    (
+        ("baseline", False, "missing"),
+        ("baseline", False, "baseline-leak"),
+        ("taught", True, "taught-omission"),
+        ("taught", True, "external-mismatch"),
+    ),
+)
+def test_e2_rejects_missing_or_forged_prompt_lineage(
+    arm: str,
+    candidate: bool,
+    prompt_mode: str,
+) -> None:
+    baseline = _arm(
+        arm="baseline",
+        resolved=False,
+        candidate=False,
+        prompt_mode=prompt_mode if arm == "baseline" else "valid",
+    )
+    taught = _arm(
+        arm="taught",
+        resolved=True,
+        candidate=True,
+        prompt_mode=prompt_mode if arm == "taught" else "valid",
+    )
+
+    with pytest.raises(ContractViolation, match="prompt|candidate projection"):
+        build_matched_counterfactual_pair(
+            candidate_id="candidate-1",
+            candidate_revision_id="candidate-r2",
+            candidate_bundle_sha256=_sha("candidate"),
+            baseline_model_receipt=baseline[0],
+            baseline_external_evidence=baseline[2],
+            baseline_native_evidence=baseline[4],
+            taught_model_receipt=taught[0],
+            taught_external_evidence=taught[2],
+            taught_native_evidence=taught[4],
+        )
 
 
 def test_e2_claim_binds_complete_matched_counterfactual_pair(tmp_path: Path) -> None:
@@ -182,9 +262,7 @@ def test_graph_rejects_direct_e2_append_without_pair_object(tmp_path: Path) -> N
         rationale="four ids and six receipts are still only metadata",
         supersedes_claim_id=None,
         counterfactual_pair_sha256="a" * 64,
-        counterfactual_receipt_ids=tuple(
-            f"receipt-{index}" for index in range(6)
-        ),
+        counterfactual_receipt_ids=tuple(f"receipt-{index}" for index in range(6)),
     )
 
     with pytest.raises(IntegrityError, match="complete counterfactual pair"):
@@ -230,7 +308,10 @@ def test_graph_rebuild_rejects_counterfactual_pair_hash_tampering(
 
 @pytest.mark.parametrize(
     ("target_kind", "expected"),
-    (("external_trace", "external receipt kind"), ("native_evaluation", "native receipt kind")),
+    (
+        ("external_trace", "external receipt kind"),
+        ("native_evaluation", "native receipt kind"),
+    ),
 )
 def test_graph_rebuild_rejects_counterfactual_evidence_backed_by_wrong_kind(
     tmp_path: Path,
@@ -384,9 +465,7 @@ def test_builder_rejects_baseline_candidate_and_native_model_rebinding() -> None
         "candidate_revision_id": "candidate-r2",
         "candidate_bundle_sha256": _sha("candidate"),
     }
-    baseline[0] = _receipt(
-        arm="baseline", kind="model", payload=rebound_payload
-    )
+    baseline[0] = _receipt(arm="baseline", kind="model", payload=rebound_payload)
     with pytest.raises(ContractViolation, match="does not bind model artifact"):
         build_matched_counterfactual_pair(
             candidate_id="candidate-1",
@@ -420,9 +499,7 @@ def test_legacy_unbound_e2_claim_requires_explicit_compatibility_reader(
     with pytest.raises(IntegrityError, match="invalid graph record"):
         graph.list_claims()
 
-    legacy_graph = EvidenceGraph(
-        tmp_path / "graph", allow_legacy_unbound_claims=True
-    )
+    legacy_graph = EvidenceGraph(tmp_path / "graph", allow_legacy_unbound_claims=True)
     (claim,) = legacy_graph.list_claims()
 
     assert claim.grade is ClaimGrade.E2

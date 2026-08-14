@@ -15,6 +15,7 @@ from evolve.contracts import (
     ContractViolation,
     EvidenceEnvelope,
     ExecutionPlan,
+    MechanismPrediction,
     Receipt,
     canonical_json,
 )
@@ -65,7 +66,11 @@ class ExecutionRuntime:
         self._clock = clock or (lambda: datetime.now(UTC))
 
     def execute(
-        self, plan: ExecutionPlan, authorization: Authorization
+        self,
+        plan: ExecutionPlan,
+        authorization: Authorization,
+        *,
+        mechanism_prediction: MechanismPrediction | None = None,
     ) -> ExecutionResult:
         existing = tuple(
             sorted(
@@ -75,6 +80,7 @@ class ExecutionRuntime:
         )
         for singleton_kind in (
             "workspace",
+            "mechanism_prediction",
             "model",
             "external_trace",
             "internal_trace",
@@ -87,11 +93,27 @@ class ExecutionRuntime:
                     f"resume contains duplicate {singleton_kind} receipts"
                 )
         self._validate_admission(plan, authorization)
+        existing_prediction = next(
+            (item for item in existing if item.kind == "mechanism_prediction"),
+            None,
+        )
+        if mechanism_prediction is None and existing_prediction is not None:
+            raise ContractViolation("resume mechanism prediction identity mismatch")
+        if (
+            mechanism_prediction is not None
+            and existing_prediction is not None
+            and existing_prediction.payload != mechanism_prediction.as_payload()
+        ):
+            raise ContractViolation("mechanism prediction identity drift")
         terminal = next(
             (item for item in reversed(existing) if item.kind == "execution_terminal"),
             None,
         )
         if terminal is not None:
+            if mechanism_prediction is not None and existing_prediction is None:
+                raise ContractViolation(
+                    "terminal replay is missing mechanism prediction receipt"
+                )
             workspace_receipt = next(
                 (item for item in existing if item.kind == "workspace"), None
             )
@@ -128,6 +150,17 @@ class ExecutionRuntime:
                 raise ContractViolation("resume plan does not match workspace receipt")
             workspace = workspace_receipt.payload
 
+            prediction_receipt = existing_by_kind.get("mechanism_prediction")
+            if mechanism_prediction is not None:
+                if prediction_receipt is None:
+                    if model_receipt is not None:
+                        raise ContractViolation(
+                            "mechanism prediction was not frozen before model dispatch"
+                        )
+                    prediction_receipt = appender.append_fact(
+                        "mechanism_prediction", mechanism_prediction.as_payload()
+                    )
+
             if model_receipt is None:
                 model_payload = dict(self._model_transport.infer(plan, workspace))
                 model_payload.update(
@@ -162,6 +195,7 @@ class ExecutionRuntime:
                     "raw_output_path",
                     "raw_output_sha256",
                     "prompt_paths",
+                    "prompt_texts",
                     "prompt_sha256",
                     "patch",
                     "patch_sha256",
@@ -172,6 +206,8 @@ class ExecutionRuntime:
                     "candidate_consumed",
                     "candidate_bundle_sha256",
                     "candidate_revision_id",
+                    "candidate_prompt",
+                    "candidate_prompt_sha256",
                     "compiled_artifact_sha256",
                     "model_identity_sha256",
                 ):
@@ -208,8 +244,8 @@ class ExecutionRuntime:
                     ) from error
                 if not isinstance(trace_payload, Mapping):
                     raise ContractViolation("internal trace artifact must be an object")
-                prediction = trace_payload.get("prediction_sha256")
-                _require_sha256(prediction, "internal prediction")
+                internal_prediction = trace_payload.get("prediction_sha256")
+                _require_sha256(internal_prediction, "internal prediction")
                 mechanism = internal_payload.get(
                     "mechanism_id", plan.metadata.get("mechanism_id")
                 )
@@ -223,8 +259,8 @@ class ExecutionRuntime:
                         "model_receipt_id": model_receipt.receipt_id,
                         "artifact_path": str(trace),
                         "artifact_sha256": trace_sha256,
-                        "prediction_sha256": prediction,
-                        "observation_sha256": prediction,
+                        "prediction_sha256": internal_prediction,
+                        "observation_sha256": internal_prediction,
                     }
                 )
                 appender.append_fact("internal_trace", internal_payload)

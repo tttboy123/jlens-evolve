@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -18,7 +19,10 @@ from evolve.contracts import (
     Cohort,
     ContractViolation,
     ExecutionLimits,
+    ExecutionPlan,
+    MechanismPrediction,
     ModelIdentity,
+    Receipt,
     TaskRevision,
     canonical_json,
 )
@@ -40,6 +44,10 @@ from evolve.observers import (
     ExternalTraceObserver,
     NativeOutcomeObserver,
     ObserverHub,
+    TrustedJacobianLensObserver,
+    TrustedJLensReceiptIssuer,
+    TrustedObserverIdentity,
+    TrustedObserverKeyring,
 )
 from evolve.proposals import CandidateCompiler, CompiledRevision, CompileSpec
 from evolve.registry import (
@@ -65,6 +73,15 @@ _DATASETS = {
     "swe-bench-multilingual": "harness-inputs/swe-bench-multilingual.jsonl",
 }
 _EXPERIMENT_MECHANISM_ID = "compiled-teacher-candidate-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class _TrustedJLensRuntime:
+    prediction: MechanismPrediction
+    observer: TrustedJacobianLensObserver
+    issuer: TrustedJLensReceiptIssuer
+    keyring: TrustedObserverKeyring
+    identity: TrustedObserverIdentity
 
 
 def _sha256(path: Path) -> str:
@@ -127,7 +144,84 @@ def _load_config(path: Path) -> dict[str, Any]:
             "legacy frozen Skill fallback fields are forbidden: "
             + ", ".join(sorted(forbidden_fallbacks))
         )
+    trusted_jlens = config.get("trusted_jlens")
+    if trusted_jlens is not None and not isinstance(trusted_jlens, dict):
+        raise ContractViolation("trusted_jlens must be an object when configured")
     return config
+
+
+def _trusted_jlens_runtime(
+    *,
+    config: Mapping[str, Any],
+    compiled: CompiledRevision,
+    receipt_store: ReceiptStore,
+) -> _TrustedJLensRuntime | None:
+    raw = config.get("trusted_jlens")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ContractViolation("trusted_jlens must be an object")
+    secret_env = raw.get("secret_env")
+    if not isinstance(secret_env, str) or not secret_env:
+        raise ContractViolation("trusted_jlens.secret_env must be non-empty")
+    secret_value = os.environ.get(secret_env)
+    if secret_value is None:
+        raise ContractViolation(
+            f"trusted JLens secret environment variable is missing: {secret_env}"
+        )
+    secret = secret_value.encode("utf-8")
+    if len(secret) < 16:
+        raise ContractViolation("trusted JLens secret must be at least 16 bytes")
+    expected = raw.get("expected_internal_effect")
+    if not isinstance(expected, Mapping):
+        raise ContractViolation(
+            "trusted_jlens.expected_internal_effect must be an object"
+        )
+    try:
+        identity = TrustedObserverIdentity(
+            key_id=str(raw.get("key_id", "")),
+            implementation_id=str(raw.get("implementation_id", "")),
+            implementation_sha256=str(raw.get("implementation_sha256", "")),
+        )
+        prediction = MechanismPrediction.create(
+            prediction_id=str(raw.get("prediction_id", "")),
+            candidate_revision_id=compiled.change_set.revision_id,
+            mechanism_id=_EXPERIMENT_MECHANISM_ID,
+            observer_config_sha256=str(raw.get("observer_config_sha256", "")),
+            expected_internal_effect=expected,
+        )
+    except (TypeError, ValueError) as error:
+        raise ContractViolation("trusted JLens configuration is invalid") from error
+    trace_root = _path(raw, "trace_root")
+    if not trace_root.is_dir():
+        raise ContractViolation("trusted_jlens.trace_root must be a directory")
+
+    def read_trace(plan: ExecutionPlan, _model_receipt: Receipt) -> bytes:
+        trace_path = (trace_root / f"{plan.plan_id}.json").resolve()
+        if trace_path.parent != trace_root:
+            raise ContractViolation("trusted JLens plan id escapes trace root")
+        try:
+            return trace_path.read_bytes()
+        except OSError as error:
+            raise ContractViolation(
+                f"trusted JLens trace is missing for plan: {plan.plan_id}"
+            ) from error
+
+    keyring = TrustedObserverKeyring({identity: secret})
+    return _TrustedJLensRuntime(
+        prediction=prediction,
+        observer=TrustedJacobianLensObserver(
+            keyring=keyring,
+            artifact_reader=receipt_store.read_artifact,
+        ),
+        issuer=TrustedJLensReceiptIssuer(
+            identity=identity,
+            secret_key=secret,
+            raw_trace_reader=read_trace,
+        ),
+        keyring=keyring,
+        identity=identity,
+    )
 
 
 def _path(config: Mapping[str, Any], name: str) -> Path:
@@ -438,11 +532,17 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
     )
     receipt_store = ReceiptStore(output_root / "receipt-store")
     graph = EvidenceGraph(output_root / "evidence-graph")
+    trusted_jlens = _trusted_jlens_runtime(
+        config=config,
+        compiled=compiled,
+        receipt_store=receipt_store,
+    )
     observer_hub = ObserverHub(
         (
             ExternalTraceObserver(),
             NativeOutcomeObserver(),
             CostObserver(),
+            *((trusted_jlens.observer,) if trusted_jlens is not None else ()),
         ),
         graph=graph,
     )
@@ -484,10 +584,14 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
             "external-trace-v1",
             "native-v1",
             "cost-v1",
+            *(("trusted-jlens-v1",) if trusted_jlens is not None else ()),
         ),
         limits=ExecutionLimits(max_tokens=1536, max_seconds=7200, max_cost_cny=0),
         final_commit_sha=final_commit,
         mechanism_id=_EXPERIMENT_MECHANISM_ID,
+        mechanism_prediction=(
+            trusted_jlens.prediction if trusted_jlens is not None else None
+        ),
         human_approval=False,
         generation_config={
             "temperature": 0,
@@ -527,6 +631,21 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
             "harness_runtime_receipt_sha256": _sha256(harness_receipt),
             "feedback_task_count": 3,
             "project_count": len({task.project for task in tasks}),
+            "trusted_jlens_mode": (
+                "configured_external_trace_root"
+                if trusted_jlens is not None
+                else "not_configured"
+            ),
+            "trusted_jlens_implementation_id": (
+                trusted_jlens.identity.implementation_id
+                if trusted_jlens is not None
+                else None
+            ),
+            "trusted_jlens_implementation_sha256": (
+                trusted_jlens.identity.implementation_sha256
+                if trusted_jlens is not None
+                else None
+            ),
         },
     )
     promotion_log = PromotionDecisionLog(
@@ -546,6 +665,9 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         claim_engine=ClaimEngine(graph),
         evidence_grade_machine=EvidenceGradeMachine(
             graph,
+            trusted_observer_verifier=(
+                trusted_jlens.keyring if trusted_jlens is not None else None
+            ),
             receipt_store=receipt_store,
         ),
         governance_service=GovernanceService(),
@@ -562,6 +684,10 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
             decision_log=promotion_log,
         ),
         report_root=output_root,
+        trusted_observation_issuer=(
+            trusted_jlens.issuer if trusted_jlens is not None else None
+        ),
+        budget_ledger=teacher_ledger,
     )
     _atomic_json(
         output_root / "SOURCE-INVENTORY.json",

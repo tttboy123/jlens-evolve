@@ -16,8 +16,11 @@ from evolve.contracts import (
     ContractViolation,
     ExecutionLimits,
     ExecutionPlan,
+    MechanismPrediction,
     ModelIdentity,
+    Receipt,
     TaskRevision,
+    canonical_json,
 )
 from evolve.evidence import (
     ClaimEngine,
@@ -34,6 +37,7 @@ from evolve.kernel import (
     CampaignController,
     CampaignStatus,
     CheckpointManager,
+    DurableCostLedger,
 )
 from evolve.live_campaign import LiveCampaignSpec, run_skill_paired_campaign
 from evolve.observers import (
@@ -42,6 +46,10 @@ from evolve.observers import (
     JacobianLensObserver,
     NativeOutcomeObserver,
     ObserverHub,
+    TrustedJacobianLensObserver,
+    TrustedJLensReceiptIssuer,
+    TrustedObserverIdentity,
+    TrustedObserverKeyring,
 )
 from evolve.registry import (
     CandidateRegistry,
@@ -146,6 +154,19 @@ class FakeTransport:
     ) -> Mapping[str, Any]:
         self.calls += 1
         output = f"prediction:{plan.task.task_id}:{plan.arm}"
+        candidate_bundle_sha256 = _spec().candidate_artifact_sha256
+        candidate_revision_id = _spec().candidate_revision_id
+        candidate_prompt = canonical_json(
+            {
+                "candidate_revision_id": candidate_revision_id,
+                "candidate_bundle_sha256": candidate_bundle_sha256,
+            }
+        )
+        prompt_text = (
+            f"SYSTEM: repair\nCOMPILED-CANDIDATE:\n{candidate_prompt}"
+            if plan.arm == "taught"
+            else "SYSTEM: baseline repair"
+        )
         return {
             "output": output,
             "patch": output,
@@ -153,10 +174,21 @@ class FakeTransport:
             "workspace_id": workspace["workspace_id"],
             "candidate_consumed": plan.arm == "taught",
             "candidate_bundle_sha256": (
-                _spec().candidate_artifact_sha256 if plan.arm == "taught" else None
+                candidate_bundle_sha256 if plan.arm == "taught" else None
             ),
             "candidate_revision_id": (
-                _spec().candidate_revision_id if plan.arm == "taught" else None
+                candidate_revision_id if plan.arm == "taught" else None
+            ),
+            "prompt_texts": [prompt_text],
+            "prompt_sha256": [_sha(prompt_text)],
+            "candidate_prompt": candidate_prompt if plan.arm == "taught" else None,
+            "candidate_prompt_sha256": (
+                _sha(candidate_prompt) if plan.arm == "taught" else None
+            ),
+            "compiled_artifact_sha256": (
+                {"COMPILED-REVISION.json": candidate_bundle_sha256}
+                if plan.arm == "taught"
+                else {}
             ),
             "cost_cny": 0.1,
             "input_tokens": 10,
@@ -276,9 +308,18 @@ def _dependencies(tmp_path: Path):
     }
 
 
-def _run(tmp_path: Path, dependencies: dict[str, Any], controller):
+def _run(
+    tmp_path: Path,
+    dependencies: dict[str, Any],
+    controller,
+    *,
+    spec: LiveCampaignSpec | None = None,
+    evidence_grade_machine: EvidenceGradeMachine | None = None,
+    trusted_observation_issuer: TrustedJLensReceiptIssuer | None = None,
+    budget_ledger: DurableCostLedger | None = None,
+):
     return run_skill_paired_campaign(
-        spec=_spec(),
+        spec=spec or _spec(),
         tasks=_tasks(),
         strategy=SkillPairedStrategy(),
         controller=controller,
@@ -289,15 +330,170 @@ def _run(tmp_path: Path, dependencies: dict[str, Any], controller):
         receipt_store=dependencies["receipts"],
         observer_hub=dependencies["observer"],
         claim_engine=ClaimEngine(dependencies["graph"]),
-        evidence_grade_machine=EvidenceGradeMachine(dependencies["graph"]),
+        evidence_grade_machine=(
+            evidence_grade_machine or EvidenceGradeMachine(dependencies["graph"])
+        ),
         governance_service=GovernanceService(),
         promotion_decision_log=dependencies["promotion_log"],
         candidate_registry=dependencies["candidate_registry"],
         capability_registry=dependencies["capability_registry"],
         rejected_registry=dependencies["rejected_registry"],
         report_root=tmp_path / "report",
+        trusted_observation_issuer=trusted_observation_issuer,
+        budget_ledger=budget_ledger,
         clock=lambda: NOW,
     )
+
+
+def test_budget_integrity_is_derived_from_the_durable_ledger(tmp_path: Path) -> None:
+    dependencies = _dependencies(tmp_path)
+    forged = replace(
+        _spec(),
+        report_metadata={
+            "budget_ledger_chain_verified": True,
+            "api_budget_limit_cny": 99.0,
+            "actual_api_spend_cny": 98.0,
+        },
+    )
+
+    without_authority = _run(
+        tmp_path,
+        dependencies,
+        dependencies["controller"],
+        spec=forged,
+    )
+    assert without_authority.report["budget_integrity_status"] == "recorded"
+
+    ledger_dependencies = _dependencies(tmp_path / "with-ledger")
+    ledger = DurableCostLedger(
+        tmp_path / "with-ledger/cost-ledger.jsonl",
+        campaign_id=forged.campaign_id,
+        max_cost_cny=10.0,
+        max_model_calls=1,
+    )
+    with_authority = _run(
+        tmp_path / "with-ledger",
+        ledger_dependencies,
+        ledger_dependencies["controller"],
+        spec=forged,
+        budget_ledger=ledger,
+    )
+    assert with_authority.report["budget_integrity_status"] == "validated"
+    assert with_authority.report["budget_spent_cny"] == 0.0
+    assert with_authority.report["api_budget_limit_cny"] == 10.0
+    assert with_authority.report["budget_ledger_event_count"] == 1
+    assert (
+        with_authority.report["budget_ledger_head_sha256"]
+        == ledger.events()[-1]["event_sha256"]
+    )
+
+
+def test_live_campaign_records_trusted_jlens_and_replays_idempotently(
+    tmp_path: Path,
+) -> None:
+    dependencies = _dependencies(tmp_path)
+    mechanism_id = "compiled-teacher-candidate-v1"
+    prediction = MechanismPrediction.create(
+        prediction_id="prediction-role-commitment-v1",
+        candidate_revision_id=_spec().candidate_revision_id,
+        mechanism_id=mechanism_id,
+        observer_config_sha256=_sha("trusted-observer-config"),
+        expected_internal_effect={
+            "concept": "declared-role",
+            "phase": "symbol-selection",
+            "min_final_score": 0.7,
+            "min_location_count": 2,
+            "require_non_decreasing": True,
+        },
+    )
+    spec = replace(
+        _spec(),
+        mechanism_id=mechanism_id,
+        mechanism_prediction=prediction,
+        task_execution_metadata={
+            revision_id: {**metadata, "mechanism_id": mechanism_id}
+            for revision_id, metadata in _spec().task_execution_metadata.items()
+        },
+    )
+    identity = TrustedObserverIdentity(
+        key_id="trusted-jlens-test-key",
+        implementation_id="trusted-jlens-test-runtime",
+        implementation_sha256=_sha("trusted-jlens-test-implementation"),
+    )
+    secret = b"trusted-jlens-test-secret-32bytes"
+    keyring = TrustedObserverKeyring({identity: secret})
+    dependencies["observer"] = ObserverHub(
+        (
+            NativeOutcomeObserver(),
+            CostObserver(),
+            ExternalTraceObserver(),
+            TrustedJacobianLensObserver(
+                keyring=keyring,
+                artifact_reader=dependencies["receipts"].read_artifact,
+            ),
+        ),
+        graph=dependencies["graph"],
+    )
+    dependencies["evaluator"] = E3FakeNativeEvaluator()
+    reader_calls: list[str] = []
+
+    def raw_trace_reader(plan: ExecutionPlan, _model_receipt: Receipt) -> bytes:
+        reader_calls.append(plan.plan_id)
+        scores = (0.6, 0.4) if plan.arm == "baseline" else (0.4, 0.9)
+        return canonical_json(
+            {
+                "locations": [
+                    {
+                        "layer": 8 + index,
+                        "token_position": 120 + index,
+                        "phase": "symbol-selection",
+                        "concept_scores": {"declared-role": score},
+                    }
+                    for index, score in enumerate(scores)
+                ]
+            }
+        ).encode()
+
+    clock_calls = 0
+
+    def issuer_clock() -> datetime:
+        nonlocal clock_calls
+        clock_calls += 1
+        return NOW + timedelta(seconds=clock_calls)
+
+    issuer = TrustedJLensReceiptIssuer(
+        identity=identity,
+        secret_key=secret,
+        raw_trace_reader=raw_trace_reader,
+        clock=issuer_clock,
+    )
+    grade_machine = EvidenceGradeMachine(
+        dependencies["graph"],
+        trusted_observer_verifier=keyring,
+        receipt_store=dependencies["receipts"],
+    )
+
+    first = _run(
+        tmp_path,
+        dependencies,
+        dependencies["controller"],
+        spec=spec,
+        evidence_grade_machine=grade_machine,
+        trusted_observation_issuer=issuer,
+    )
+    second = _run(
+        tmp_path,
+        dependencies,
+        dependencies["controller"],
+        spec=spec,
+        evidence_grade_machine=grade_machine,
+        trusted_observation_issuer=issuer,
+    )
+
+    assert first.evidence_state.grade.value == "E3"
+    assert second.evidence_state.grade.value == "E3"
+    assert len(reader_calls) == 6
+    assert len(dependencies["graph"].evidence_by_observer("trusted-jlens-v1")) == 6
 
 
 def test_runtime_backed_campaign_builds_six_plans_and_projects_auditable_assets(
@@ -388,6 +584,11 @@ def test_runtime_backed_campaign_builds_six_plans_and_projects_auditable_assets(
     assert result.report["implementation_status"] == "complete"
     assert result.report["causal_pipeline_status"] == "validated"
     assert result.report["empirical_gain_status"] == "regression"
+    assert result.report["e2_lineage_status"] == "validated"
+    assert result.report["e2_counterfactual_receipt_count"] == 18
+    assert result.report["e3_trust_status"] == "guarded_not_observed"
+    assert result.report["governance_status"] == "rejected"
+    assert result.report["budget_integrity_status"] == "recorded"
     assert result.report["full_v3_release_status"] == "incomplete"
     assert result.report["budget_spent_cny"] == pytest.approx(0.6)
     assert (
@@ -514,8 +715,7 @@ def test_all_neutral_campaign_is_no_change_and_not_rejected(tmp_path: Path) -> N
     result = _run(tmp_path, dependencies, dependencies["controller"])
 
     assert all(
-        claim.classification is ClaimClassification.NEUTRAL
-        for claim in result.claims
+        claim.classification is ClaimClassification.NEUTRAL for claim in result.claims
     )
     assert result.promotion_decision.gate_decision is GateDecision.NO_CHANGE
     assert result.capability is None

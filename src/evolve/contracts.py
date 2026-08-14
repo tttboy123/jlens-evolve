@@ -65,8 +65,7 @@ def _jsonable(value: Any) -> Any:
                 and getattr(value, field.name) is None
             )
             and not (
-                field.metadata.get("omit_if_empty")
-                and not getattr(value, field.name)
+                field.metadata.get("omit_if_empty") and not getattr(value, field.name)
             )
         }
     if isinstance(value, StrEnum):
@@ -136,6 +135,102 @@ class ExecutionLimits:
     def __post_init__(self) -> None:
         if self.max_tokens < 0 or self.max_seconds <= 0 or self.max_cost_cny < 0:
             raise ContractViolation("execution limits must be non-negative and bounded")
+
+
+@dataclass(frozen=True, slots=True)
+class MechanismPrediction:
+    """A falsifiable internal-effect prediction frozen before model dispatch."""
+
+    prediction_id: str
+    candidate_revision_id: str
+    mechanism_id: str
+    observer_config_sha256: str
+    expected_internal_effect_json: str
+    expected_internal_effect_sha256: str
+
+    def __post_init__(self) -> None:
+        for name in ("prediction_id", "candidate_revision_id", "mechanism_id"):
+            _require_text(name, getattr(self, name))
+        _require_sha256("observer_config_sha256", self.observer_config_sha256)
+        _require_sha256(
+            "expected_internal_effect_sha256",
+            self.expected_internal_effect_sha256,
+        )
+        try:
+            effect = json.loads(self.expected_internal_effect_json)
+        except json.JSONDecodeError as error:
+            raise ContractViolation(
+                "expected_internal_effect_json must be valid JSON"
+            ) from error
+        if not isinstance(effect, Mapping) or not effect:
+            raise ContractViolation("expected internal effect must be an object")
+        if canonical_json(effect) != self.expected_internal_effect_json:
+            raise ContractViolation("expected internal effect must use canonical JSON")
+        if content_sha256(effect) != self.expected_internal_effect_sha256:
+            raise ContractViolation("expected internal effect SHA-256 mismatch")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        prediction_id: str,
+        candidate_revision_id: str,
+        mechanism_id: str,
+        observer_config_sha256: str,
+        expected_internal_effect: Mapping[str, Any],
+    ) -> MechanismPrediction:
+        canonical_effect = canonical_json(expected_internal_effect)
+        return cls(
+            prediction_id=prediction_id,
+            candidate_revision_id=candidate_revision_id,
+            mechanism_id=mechanism_id,
+            observer_config_sha256=observer_config_sha256,
+            expected_internal_effect_json=canonical_effect,
+            expected_internal_effect_sha256=content_sha256(expected_internal_effect),
+        )
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> MechanismPrediction:
+        required = {
+            "prediction_id",
+            "candidate_revision_id",
+            "mechanism_id",
+            "observer_config_sha256",
+            "expected_internal_effect",
+            "expected_internal_effect_sha256",
+        }
+        if set(payload) != required:
+            raise ContractViolation("mechanism prediction payload fields are invalid")
+        effect = payload["expected_internal_effect"]
+        if not isinstance(effect, Mapping):
+            raise ContractViolation("expected internal effect must be an object")
+        return cls(
+            prediction_id=str(payload["prediction_id"]),
+            candidate_revision_id=str(payload["candidate_revision_id"]),
+            mechanism_id=str(payload["mechanism_id"]),
+            observer_config_sha256=str(payload["observer_config_sha256"]),
+            expected_internal_effect_json=canonical_json(effect),
+            expected_internal_effect_sha256=str(
+                payload["expected_internal_effect_sha256"]
+            ),
+        )
+
+    @property
+    def expected_internal_effect(self) -> Mapping[str, Any]:
+        value = json.loads(self.expected_internal_effect_json)
+        if not isinstance(value, dict):  # guaranteed by construction
+            raise ContractViolation("expected internal effect must be an object")
+        return value
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            "prediction_id": self.prediction_id,
+            "candidate_revision_id": self.candidate_revision_id,
+            "mechanism_id": self.mechanism_id,
+            "observer_config_sha256": self.observer_config_sha256,
+            "expected_internal_effect": dict(self.expected_internal_effect),
+            "expected_internal_effect_sha256": self.expected_internal_effect_sha256,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +391,8 @@ class CounterfactualArmEvidence:
     native_outcome_receipt_id: str
     native_outcome_artifact_sha256: str
     prediction_sha256: str
+    prompt_bundle_sha256: str
+    candidate_prompt_sha256: str | None
     candidate_consumed: bool
     candidate_revision_id: str | None
     candidate_bundle_sha256: str | None
@@ -321,6 +418,7 @@ class CounterfactualArmEvidence:
             "native_outcome_evidence_sha256",
             "native_outcome_artifact_sha256",
             "prediction_sha256",
+            "prompt_bundle_sha256",
         ):
             _require_sha256(name, getattr(self, name))
         if self.arm == "baseline":
@@ -328,6 +426,7 @@ class CounterfactualArmEvidence:
                 self.candidate_consumed
                 or self.candidate_revision_id is not None
                 or self.candidate_bundle_sha256 is not None
+                or self.candidate_prompt_sha256 is not None
             ):
                 raise ContractViolation("baseline arm contains candidate lineage")
         else:
@@ -336,6 +435,9 @@ class CounterfactualArmEvidence:
             _require_text("candidate_revision_id", self.candidate_revision_id or "")
             _require_sha256(
                 "candidate_bundle_sha256", self.candidate_bundle_sha256 or ""
+            )
+            _require_sha256(
+                "candidate_prompt_sha256", self.candidate_prompt_sha256 or ""
             )
 
     @property
@@ -453,9 +555,9 @@ class Claim:
                     raise ContractViolation(
                         "E2/E3 claim requires complete counterfactual lineage"
                     )
-            elif len(self.evidence_ids) != 4 or len(
-                self.counterfactual_receipt_ids
-            ) != 6:
+            elif (
+                len(self.evidence_ids) != 4 or len(self.counterfactual_receipt_ids) != 6
+            ):
                 raise ContractViolation(
                     "E2/E3 claim requires all counterfactual evidence and receipts"
                 )

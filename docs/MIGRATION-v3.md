@@ -14,6 +14,8 @@
 | Mutable task checkout selection | `FrozenSourceWorkspaceManager` | replaced with clean, exact-revision admission |
 | Frozen taught Skill selection | `CandidateCompiler` + compiled Skill/Operator/Router | replaced; no live fallback |
 | In-memory Teacher `_spent_cny` | chained `DurableCostLedger` + head anchor | replaced for new calls and replay |
+| Post-hoc internal-effect target | pre-dispatch `MechanismPrediction` Receipt | replaced for trusted JLens campaigns |
+| Self-described JLens evidence | signed observation + exact Receipt Store replay | rejected for E3 |
 | Direct Capability append | `GovernanceService` + `PromotionDecisionLog` | rejected by authoritative registry |
 
 ## One live authority path
@@ -36,9 +38,12 @@ and native outcome. Old unbound E2 records require an explicit legacy-read flag
 and cannot be minted by the new Claim path. E3 additionally requires repeated
 cross-project gains and a cryptographically attested independent JLens
 observation bound to the same model receipt/artifact as external and native
-evidence. E3 projection first rebuilds every counterfactual pair from the
-Receipt Store and rejects missing, renamed, wrong-kind or artifact-drifted
-receipts. Generic legacy JLens traces remain readable but are never E3 eligible.
+evidence. The expected internal effect is frozen as a MechanismPrediction receipt
+before model dispatch, so it cannot be selected after seeing the trace. E3
+projection first rebuilds every counterfactual pair and then replays the exact
+prediction, model and trusted-observation receipts from the Receipt Store. It
+rejects missing, reordered, renamed, wrong-kind or artifact-drifted receipts.
+Generic legacy JLens traces remain readable but are never E3 eligible.
 Candidate, Rejected and Capability registries are separate: neutral remains
 `no_change`, infra remains `blocked`, regression is `rejected`, and only a
 decision-log-backed, human-approved E3 decision signed by the configured
@@ -50,6 +55,11 @@ The CLI rejects non-feedback tasks, source revision drift, dirty checkouts,
 evaluator/model hash drift, a config not bound to the current Git commit, and
 receipt/manifest hash mismatch. `r076`, `r078`, fresh holdout and final-sealed
 cohorts are outside this path and cannot be authorized by its configuration.
+The optional `trusted_jlens` config reads canonical per-plan traces from an
+external trace root and takes its signing secret only from a named environment
+variable. If absent, the product path remains explicitly E2. Budget validity is
+likewise authority-derived: only a successfully replayed DurableCostLedger can
+project `validated`; report metadata alone projects no such claim.
 
 The historical repository remains immutable and is referenced by content hash. No
 legacy schema reader, sealed artifact, Catalog, review, or cost ledger was deleted.

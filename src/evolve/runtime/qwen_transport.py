@@ -67,7 +67,11 @@ class LegacyQwenPairTransport:
             "raw_output_path",
             "raw_output_sha256",
             "prompt_paths",
+            "prompt_texts",
             "prompt_sha256",
+            "candidate_prompt",
+            "candidate_prompt_sha256",
+            "compiled_artifact_sha256",
             "structural_valid",
             "failure_reason",
             "input_tokens",
@@ -89,16 +93,26 @@ class LegacyQwenPairTransport:
         ):
             raise ContractViolation("Qwen raw output identity mismatch")
         prompt_paths = result["prompt_paths"]
+        prompt_texts = result["prompt_texts"]
         prompt_hashes = result["prompt_sha256"]
         if (
             not isinstance(prompt_paths, list)
+            or not isinstance(prompt_texts, list)
             or not isinstance(prompt_hashes, list)
+            or len(prompt_paths) != len(prompt_texts)
             or len(prompt_paths) != len(prompt_hashes)
         ):
             raise ContractViolation("Qwen prompt evidence is invalid")
-        for raw_prompt, expected in zip(prompt_paths, prompt_hashes, strict=True):
+        for raw_prompt, prompt_text, expected in zip(
+            prompt_paths, prompt_texts, prompt_hashes, strict=True
+        ):
             prompt = Path(str(raw_prompt)).resolve()
-            if not prompt.is_file() or _sha256_file(prompt) != expected:
+            if (
+                not isinstance(prompt_text, str)
+                or not prompt.is_file()
+                or prompt.read_text(encoding="utf-8") != prompt_text
+                or _sha256_file(prompt) != expected
+            ):
                 raise ContractViolation("Qwen prompt identity mismatch")
         if not isinstance(result["structural_valid"], bool):
             raise ContractViolation("Qwen structural outcome is invalid")
@@ -161,13 +175,13 @@ class LegacyQwenCellRunner:
         if root not in sys.path:
             sys.path.insert(0, root)
         try:
-            from mlx_lm import generate, load
-            from skill_evolution_loop.operator_student import (
+            from mlx_lm import generate, load  # type: ignore[import-not-found]
+            from skill_evolution_loop.operator_student import (  # type: ignore[import-not-found]
                 MlxOperatorPlanGenerator,
                 OperatorPlanAdapter,
                 build_operator_conditions,
             )
-            from skill_evolution_loop.span_student import (
+            from skill_evolution_loop.span_student import (  # type: ignore[import-not-found]
                 MlxSpanPlanGenerator,
                 SpanPlanAdapter,
                 build_span_conditions,
@@ -243,6 +257,11 @@ class LegacyQwenCellRunner:
         if not checkout.is_dir():
             raise ContractViolation("Qwen workspace checkout is missing")
         compiled = self._compiled_for_plan(plan)
+        candidate_prompt = (
+            compiled_candidate_prompt(compiled, plan.task.task_id)
+            if compiled is not None
+            else None
+        )
         identity = {
             "plan_sha256": plan.content_sha256,
             "workspace_source_sha256": workspace.get("task_source_sha256"),
@@ -253,13 +272,20 @@ class LegacyQwenCellRunner:
             "candidate_bundle_sha256": (
                 compiled.bundle_sha256 if compiled is not None else None
             ),
+            "candidate_prompt_sha256": (
+                _sha256_bytes(candidate_prompt.encode())
+                if candidate_prompt is not None
+                else None
+            ),
         }
         target = output_root.resolve() / plan.plan_id
         if target.exists():
             return self._load_frozen_result(target, identity)
         target.parent.mkdir(parents=True, exist_ok=True)
         runtime = self._load_runtime()
-        from skill_evolution_loop.student_adapter import StudentTask
+        from skill_evolution_loop.student_adapter import (  # type: ignore[import-not-found]
+            StudentTask,
+        )
 
         student_task = StudentTask.create(
             task_id=legacy_task_id,
@@ -328,6 +354,12 @@ class LegacyQwenCellRunner:
                 ),
                 "compiled_artifact_sha256": (
                     dict(compiled.artifact_sha256) if compiled is not None else {}
+                ),
+                "candidate_prompt": candidate_prompt,
+                "candidate_prompt_sha256": (
+                    _sha256_bytes(candidate_prompt.encode())
+                    if candidate_prompt is not None
+                    else None
                 ),
                 "model_identity_sha256": self._model_identity(),
                 "input_tokens": 0,
@@ -448,6 +480,7 @@ class LegacyQwenCellRunner:
             "raw_output_path": str(raw),
             "raw_output_sha256": frozen["raw_output_sha256"],
             "prompt_paths": [str(path) for path in prompt_files],
+            "prompt_texts": [path.read_text(encoding="utf-8") for path in prompt_files],
             "prompt_sha256": prompt_hashes,
             "structural_valid": bool(frozen["structural_valid"]),
             "failure_reason": frozen.get("failure_reason"),
@@ -457,6 +490,8 @@ class LegacyQwenCellRunner:
             "candidate_bundle_sha256": frozen.get("candidate_bundle_sha256"),
             "candidate_revision_id": frozen.get("candidate_revision_id"),
             "compiled_artifact_sha256": frozen.get("compiled_artifact_sha256", {}),
+            "candidate_prompt": frozen.get("candidate_prompt"),
+            "candidate_prompt_sha256": frozen.get("candidate_prompt_sha256"),
             "model_identity_sha256": frozen["model_identity_sha256"],
             "input_tokens": int(frozen["input_tokens"]),
             "output_tokens": int(frozen["output_tokens"]),

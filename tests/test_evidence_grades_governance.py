@@ -16,7 +16,9 @@ from evolve.contracts import (
     CounterfactualArmEvidence,
     EvidenceEnvelope,
     MatchedCounterfactualPair,
+    MechanismPrediction,
     Receipt,
+    canonical_json,
 )
 from evolve.evidence import ClaimEngine, EvidenceGradeMachine, EvidenceGraph
 from evolve.governance import (
@@ -29,6 +31,7 @@ from evolve.observers import (
     TrustedJacobianLensObserver,
     TrustedObserverIdentity,
     TrustedObserverKeyring,
+    derive_structured_jlens_observation,
     issue_trusted_observation_attestation,
 )
 from evolve.registry import (
@@ -51,9 +54,7 @@ TRUST_KEYRING = TrustedObserverKeyring({TRUST_IDENTITY: TRUST_SECRET})
 
 
 def _grade_machine(graph: EvidenceGraph) -> EvidenceGradeMachine:
-    return EvidenceGradeMachine(
-        graph, trusted_observer_verifier=TRUST_KEYRING
-    )
+    return EvidenceGradeMachine(graph, trusted_observer_verifier=TRUST_KEYRING)
 
 
 def _append_claim(
@@ -134,6 +135,10 @@ def _append_claim(
             native_outcome_receipt_id=evidence.receipt_ids[0],
             native_outcome_artifact_sha256=evidence.artifact_sha256,
             prediction_sha256=prediction,
+            prompt_bundle_sha256=hashlib.sha256(
+                f"prompt:{task_revision_id}:{arm}".encode()
+            ).hexdigest(),
+            candidate_prompt_sha256=("e" * 64 if arm == "taught" else None),
             candidate_consumed=arm == "taught",
             candidate_revision_id="candidate-r1" if arm == "taught" else None,
             candidate_bundle_sha256="b" * 64 if arm == "taught" else None,
@@ -210,25 +215,23 @@ def _append_prediction_evidence(
         model_artifact_sha256 = hashlib.sha256(
             f"model:{task_revision_id}:{arm}".encode()
         ).hexdigest()
-        external_receipt_id = (
-            f"receipt-{task_revision_id}-{arm}-external-trace-v1"
-        )
+        external_receipt_id = f"receipt-{task_revision_id}-{arm}-external-trace-v1"
         external = EvidenceEnvelope(
-                evidence_id=f"evidence-{task_revision_id}-{arm}-external-trace-v1",
-                receipt_ids=(external_receipt_id,),
-                observer_id="external-trace-v1",
-                grade=ClaimGrade.E0,
-                payload={
-                    "task_revision_id": task_revision_id,
-                    "plan_id": plan_id,
-                    "arm": arm,
-                    "mechanism_id": mechanism_id,
-                    "prediction_sha256": prediction,
-                    "model_receipt_id": model_receipt_id,
-                    "model_artifact_sha256": model_artifact_sha256,
-                },
-                artifact_sha256=SHA,
-            )
+            evidence_id=f"evidence-{task_revision_id}-{arm}-external-trace-v1",
+            receipt_ids=(external_receipt_id,),
+            observer_id="external-trace-v1",
+            grade=ClaimGrade.E0,
+            payload={
+                "task_revision_id": task_revision_id,
+                "plan_id": plan_id,
+                "arm": arm,
+                "mechanism_id": mechanism_id,
+                "prediction_sha256": prediction,
+                "model_receipt_id": model_receipt_id,
+                "model_artifact_sha256": model_artifact_sha256,
+            },
+            artifact_sha256=SHA,
+        )
         existing = {row.evidence_id: row for row in graph.list_evidence()}.get(
             external.evidence_id
         )
@@ -237,14 +240,53 @@ def _append_prediction_evidence(
         else:
             assert existing == external
         observed_prediction = prediction if consistent else "f" * 64
-        observation = json.dumps(
+        mechanism_prediction = MechanismPrediction.create(
+            prediction_id="prediction-role-commitment-v1",
+            candidate_revision_id="candidate-r1",
+            mechanism_id=mechanism_id,
+            observer_config_sha256=hashlib.sha256(b"observer-config").hexdigest(),
+            expected_internal_effect={
+                "concept": "declared-role",
+                "phase": "symbol-selection",
+                "min_final_score": 0.7,
+                "min_location_count": 2,
+                "require_non_decreasing": True,
+            },
+        )
+        mechanism_prediction_payload = mechanism_prediction.as_payload()
+        mechanism_prediction_receipt = Receipt(
+            receipt_id=f"receipt-{plan_id}-mechanism-prediction",
+            campaign_id="campaign-1",
+            plan_id=plan_id,
+            sequence=1,
+            kind="mechanism_prediction",
+            created_at="2026-08-14T05:59:00Z",
+            payload=mechanism_prediction_payload,
+            artifact_sha256=hashlib.sha256(
+                canonical_json(mechanism_prediction_payload).encode()
+            ).hexdigest(),
+        )
+        scores = (0.6, 0.4) if arm == "baseline" else (0.4, 0.9)
+        raw_trace = json.dumps(
             {
-                "mechanism_id": mechanism_id,
-                "prediction_sha256": observed_prediction,
+                "locations": [
+                    {
+                        "layer": 8 + index,
+                        "token_position": 120 + index,
+                        "phase": "symbol-selection",
+                        "concept_scores": {"declared-role": score},
+                    }
+                    for index, score in enumerate(scores)
+                ]
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
+        observation = derive_structured_jlens_observation(
+            raw_trace_artifact=raw_trace,
+            mechanism_prediction_receipt=mechanism_prediction_receipt,
+            prediction_sha256=observed_prediction,
+        )
         trusted_receipt_id = f"receipt-{task_revision_id}-{arm}-trusted-jlens"
         attestation = issue_trusted_observation_attestation(
             identity=TRUST_IDENTITY,
@@ -351,8 +393,8 @@ def test_evidence_grade_machine_does_not_promote_unreplayed_claims_to_e3(
     assert three.e3_eligible is False
     assert three.classification == "gain"
     assert (three.task_count, three.project_count) == (3, 2)
-    assert three.prediction_consistent_task_count == 3
-    assert len(three.prediction_evidence_ids) == 18
+    assert three.prediction_consistent_task_count == 0
+    assert three.prediction_evidence_ids == ()
 
 
 @pytest.mark.parametrize(
@@ -437,7 +479,7 @@ def test_e3_rejects_external_or_internal_prediction_mismatch(tmp_path: Path) -> 
     )
 
     assert state.grade is ClaimGrade.E2
-    assert state.prediction_consistent_task_count == 2
+    assert state.prediction_consistent_task_count == 0
     assert state.e3_eligible is False
 
 
@@ -469,7 +511,7 @@ def test_e3_rejects_native_prediction_mismatch(tmp_path: Path) -> None:
     )
 
     assert state.grade is ClaimGrade.E2
-    assert state.prediction_consistent_task_count == 2
+    assert state.prediction_consistent_task_count == 0
     assert state.e3_eligible is False
 
 
@@ -554,7 +596,15 @@ def test_governance_decision_is_immutable_replay_safe_and_projects_asset_semanti
     # This test exercises Governance/Registry projection.  The independent
     # ReceiptStore-backed positive E3 path is covered by
     # test_trusted_observer_e3; treat its output as the upstream authority.
-    state = replace(state, grade=ClaimGrade.E3, e3_eligible=True)
+    state = replace(
+        state,
+        grade=ClaimGrade.E3,
+        e3_eligible=True,
+        prediction_consistent_task_count=3,
+        prediction_evidence_ids=tuple(
+            f"authoritative-upstream-evidence-{index}" for index in range(18)
+        ),
+    )
     candidate = CandidateRecord(
         candidate_id="candidate-1",
         revision_id="candidate-r1",

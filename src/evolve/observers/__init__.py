@@ -10,8 +10,10 @@ from .observer_hub import (
 )
 from .trusted_jlens import (
     TrustedJacobianLensObserver,
+    TrustedJLensReceiptIssuer,
     TrustedObserverIdentity,
     TrustedObserverKeyring,
+    derive_structured_jlens_observation,
     issue_trusted_observation_attestation,
 )
 
@@ -23,7 +25,9 @@ __all__ = [
     "ObserverHub",
     "SafetyObserver",
     "TrustedJacobianLensObserver",
+    "TrustedJLensReceiptIssuer",
     "TrustedObserverIdentity",
     "TrustedObserverKeyring",
+    "derive_structured_jlens_observation",
     "issue_trusted_observation_attestation",
 ]

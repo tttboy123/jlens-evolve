@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Mapping
 
 from evolve.alignment.native_pair import MATCHED_IDENTITY_FIELDS
@@ -50,7 +51,9 @@ def build_matched_counterfactual_pair(
     identity: dict[str, Any] = {}
     for field in MATCHED_IDENTITY_FIELDS:
         if field not in baseline_native or field not in taught_native:
-            raise ContractViolation(f"counterfactual native evidence is missing {field}")
+            raise ContractViolation(
+                f"counterfactual native evidence is missing {field}"
+            )
         if baseline_native[field] != taught_native[field]:
             raise ContractViolation(f"counterfactual arms have unmatched {field}")
         identity[field] = baseline_native[field]
@@ -116,6 +119,13 @@ def _build_arm(
     if len({model_prediction, external_prediction, native_prediction}) != 1:
         raise ContractViolation(f"{arm} prediction artifact lineage mismatch")
 
+    prompt_bundle_sha256, candidate_prompt_sha256 = _validate_prompt_lineage(
+        arm,
+        model.payload,
+        candidate_revision_id=candidate_revision_id,
+        candidate_bundle_sha256=candidate_bundle_sha256,
+    )
+
     consumed = model.payload.get("candidate_consumed")
     revision = model.payload.get("candidate_revision_id")
     bundle = model.payload.get("candidate_bundle_sha256")
@@ -125,10 +135,21 @@ def _build_arm(
         ("candidate_consumed", consumed),
         ("candidate_revision_id", revision),
         ("candidate_bundle_sha256", bundle),
+        ("prompt_texts", model.payload.get("prompt_texts")),
+        ("prompt_sha256", model.payload.get("prompt_sha256")),
+        ("candidate_prompt", model.payload.get("candidate_prompt")),
+        (
+            "candidate_prompt_sha256",
+            model.payload.get("candidate_prompt_sha256"),
+        ),
+        (
+            "compiled_artifact_sha256",
+            model.payload.get("compiled_artifact_sha256"),
+        ),
     ):
         if external.payload.get(field) != expected:
             raise ContractViolation(
-                f"{arm} external candidate lineage does not match model"
+                f"{arm} external {field} lineage does not match model"
             )
     if arm == "baseline":
         if consumed or revision is not None or bundle is not None:
@@ -156,10 +177,84 @@ def _build_arm(
         native_outcome_receipt_id=_only_receipt_id(native, arm, "native"),
         native_outcome_artifact_sha256=native.artifact_sha256,
         prediction_sha256=model_prediction,
+        prompt_bundle_sha256=prompt_bundle_sha256,
+        candidate_prompt_sha256=candidate_prompt_sha256,
         candidate_consumed=consumed,
         candidate_revision_id=revision if isinstance(revision, str) else None,
         candidate_bundle_sha256=bundle if isinstance(bundle, str) else None,
     )
+
+
+def _validate_prompt_lineage(
+    arm: str,
+    payload: Mapping[str, Any],
+    *,
+    candidate_revision_id: str,
+    candidate_bundle_sha256: str,
+) -> tuple[str, str | None]:
+    prompt_texts = payload.get("prompt_texts")
+    prompt_hashes = payload.get("prompt_sha256")
+    if (
+        not isinstance(prompt_texts, list)
+        or not prompt_texts
+        or not all(isinstance(value, str) and value for value in prompt_texts)
+        or not isinstance(prompt_hashes, list)
+        or len(prompt_hashes) != len(prompt_texts)
+    ):
+        raise ContractViolation(f"{arm} prompt evidence is missing or invalid")
+    expected_hashes = [
+        hashlib.sha256(value.encode("utf-8")).hexdigest() for value in prompt_texts
+    ]
+    if prompt_hashes != expected_hashes:
+        raise ContractViolation(f"{arm} prompt hashes do not bind prompt bytes")
+
+    joined_prompt = "\n".join(prompt_texts)
+    candidate_prompt = payload.get("candidate_prompt")
+    candidate_prompt_sha256 = payload.get("candidate_prompt_sha256")
+    compiled_artifacts = payload.get("compiled_artifact_sha256")
+    if arm == "baseline":
+        if candidate_prompt is not None or candidate_prompt_sha256 is not None:
+            raise ContractViolation(
+                "baseline prompt contains candidate projection metadata"
+            )
+        if compiled_artifacts not in ({}, None):
+            raise ContractViolation(
+                "baseline prompt contains compiled candidate artifacts"
+            )
+        if any(
+            marker in joined_prompt
+            for marker in (
+                "COMPILED-CANDIDATE:",
+                candidate_revision_id,
+                candidate_bundle_sha256,
+            )
+        ):
+            raise ContractViolation("baseline prompt leaks candidate projection")
+        return content_sha256(prompt_texts), None
+
+    if not isinstance(candidate_prompt, str) or not candidate_prompt:
+        raise ContractViolation("taught candidate projection is missing")
+    if (
+        candidate_prompt_sha256
+        != hashlib.sha256(candidate_prompt.encode("utf-8")).hexdigest()
+    ):
+        raise ContractViolation("taught candidate projection hash mismatch")
+    if (
+        candidate_revision_id not in candidate_prompt
+        or candidate_bundle_sha256 not in candidate_prompt
+    ):
+        raise ContractViolation("taught candidate projection identity mismatch")
+    if "COMPILED-CANDIDATE:" not in joined_prompt or not any(
+        candidate_prompt in prompt for prompt in prompt_texts
+    ):
+        raise ContractViolation("taught prompt did not consume candidate projection")
+    if not isinstance(compiled_artifacts, dict) or not compiled_artifacts:
+        raise ContractViolation("taught compiled candidate artifacts are missing")
+    for value in compiled_artifacts.values():
+        _prediction_sha256(
+            {"prediction_sha256": value}, label="taught compiled artifact"
+        )
+    return content_sha256(prompt_texts), candidate_prompt_sha256
 
 
 def _validate_evidence(

@@ -95,7 +95,13 @@ class CampaignReportProjector:
             f"- Causal pipeline: `{report.get('causal_pipeline_status', 'unknown')}`\n"
             f"- Empirical gain: `{report.get('empirical_gain_status', 'unknown')}`\n"
             f"- Evidence grade: `{report.get('evidence_grade_reached', 'unknown')}`\n"
+            f"- E2 lineage: `{report.get('e2_lineage_status', 'unknown')}` "
+            f"({report.get('e2_counterfactual_receipt_count', 0)} receipts)\n"
+            f"- E3 trust: `{report.get('e3_trust_status', 'unknown')}` "
+            f"({report.get('e3_trusted_evidence_count', 0)} evidence rows)\n"
             f"- Promotion: `{report.get('promotion_status', 'unknown')}`\n"
+            f"- Governance: `{report.get('governance_status', 'unknown')}`\n"
+            f"- Budget integrity: `{report.get('budget_integrity_status', 'unknown')}`\n"
             f"- Full v3 release: `{report.get('full_v3_release_status', 'unknown')}`\n"
             f"- Unresolved findings: `{canonical_json(report.get('unresolved_findings', []))}`\n"
         )

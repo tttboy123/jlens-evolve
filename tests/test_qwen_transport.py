@@ -63,13 +63,19 @@ class RecordingCellRunner:
         artifact_root.mkdir(parents=True)
         raw_path = artifact_root / "raw-output.txt"
         raw_path.write_text("fresh model output", encoding="utf-8")
+        prompt_path = artifact_root / "prompt-000.txt"
+        prompt_path.write_text("SYSTEM: baseline repair", encoding="utf-8")
         return {
             "patch": "diff --git a/a.py b/a.py\n",
             "patch_sha256": "58796596d75205da0ff5f87d83bc169e9ec91b6f6a6c21cbd47af71bf79be2b0",
             "raw_output_path": str(raw_path),
             "raw_output_sha256": "34a4c0279bcfbbc80397957d648c02a67a2f00c1352c1f7c5516ee8a6da6c5b8",
-            "prompt_paths": [],
-            "prompt_sha256": [],
+            "prompt_paths": [str(prompt_path)],
+            "prompt_texts": ["SYSTEM: baseline repair"],
+            "prompt_sha256": [hashlib.sha256(b"SYSTEM: baseline repair").hexdigest()],
+            "candidate_prompt": None,
+            "candidate_prompt_sha256": None,
+            "compiled_artifact_sha256": {},
             "structural_valid": True,
             "failure_reason": None,
             "input_tokens": 0,

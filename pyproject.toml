@@ -13,6 +13,7 @@ dependencies = []
 dev = [
   "pytest>=9,<10",
   "ruff>=0.16,<0.17",
+  "mypy>=2.3,<3",
 ]
 
 [project.scripts]
@@ -35,3 +36,7 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
 
+[tool.mypy]
+python_version = "3.12"
+files = ["src"]
+warn_unused_configs = true

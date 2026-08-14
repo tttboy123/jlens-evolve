@@ -215,6 +215,10 @@ def main(argv: list[str] | None = None) -> int:
     verify = sub.add_parser("verify-manifest")
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--root", type=Path, required=True)
+    continuous = sub.add_parser("continuous-feedback-evolution")
+    continuous.add_argument("--config", type=Path, required=True)
+    continuous.add_argument("--output", type=Path, required=True)
+    continuous.add_argument("--worktree-root", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "legacy-feedback-e2e":
         report = run_legacy_feedback_e2e(
@@ -235,6 +239,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "seal-run":
         count = seal_run(args.root.resolve())
         print(f"sealed and verified {count} manifest entries")
+        return 0
+    if args.command == "continuous-feedback-evolution":
+        from evolve.continuous_batch import run_continuous_feedback_evolution
+
+        report = run_continuous_feedback_evolution(
+            config_path=args.config.resolve(),
+            output_root=args.output.resolve(),
+            worktree_root=args.worktree_root.resolve(),
+        )
+        print(canonical_json(report))
         return 0
     count = AuditVerifier().verify_manifest(args.manifest.resolve(), root=args.root)
     print(f"verified {count} manifest entries")

@@ -23,6 +23,7 @@ from evolve.contracts import (
     EvidenceEnvelope,
     ExecutionLimits,
     ExecutionPlan,
+    MechanismPrediction,
     ModelIdentity,
     Receipt,
     TaskRevision,
@@ -44,9 +45,10 @@ from evolve.kernel import (
     CampaignController,
     CampaignSnapshot,
     CampaignStatus,
+    DurableCostLedger,
     WorkItemSnapshot,
 )
-from evolve.observers import ObserverHub
+from evolve.observers import ObserverHub, TrustedJLensReceiptIssuer
 from evolve.registry import (
     CandidateRecord,
     CandidateRegistry,
@@ -83,6 +85,7 @@ class LiveCampaignSpec:
     limits: ExecutionLimits
     final_commit_sha: str
     mechanism_id: str | None = None
+    mechanism_prediction: MechanismPrediction | None = None
     human_approval: bool = False
     generation_config: Mapping[str, Any] = field(default_factory=dict)
     task_execution_metadata: Mapping[str, Mapping[str, Any]] = field(
@@ -128,6 +131,8 @@ def run_skill_paired_campaign(
     capability_registry: CapabilityRegistry,
     rejected_registry: RejectedRegistry,
     report_root: str | Path,
+    trusted_observation_issuer: TrustedJLensReceiptIssuer | None = None,
+    budget_ledger: DurableCostLedger | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> LiveCampaignResult:
     """Run or idempotently replay one three-task feedback paired campaign.
@@ -156,7 +161,7 @@ def run_skill_paired_campaign(
             observer_policy_ids=spec.observer_policy_ids,
             limits=spec.limits,
             generation_config=spec.generation_config,
-            plan_metadata=spec.task_execution_metadata.get(task.revision_id, {}),
+            plan_metadata=dict(spec.task_execution_metadata.get(task.revision_id, {})),
         )
         for task in task_rows
     )
@@ -200,7 +205,11 @@ def run_skill_paired_campaign(
     )
     executions: list[ExecutionResult] = []
     for plan in plans:
-        execution = runtime.execute(plan, authorization)
+        execution = runtime.execute(
+            plan,
+            authorization,
+            mechanism_prediction=spec.mechanism_prediction,
+        )
         executions.append(execution)
         _validate_candidate_isolation(
             plans=(plan,),
@@ -218,6 +227,44 @@ def run_skill_paired_campaign(
                     succeeded=execution.status == "completed",
                 )
 
+    if trusted_observation_issuer is not None:
+        if spec.mechanism_prediction is None:
+            raise ContractViolation(
+                "trusted observation issuer requires a mechanism prediction"
+            )
+        for plan, execution in zip(plans, executions, strict=True):
+            if execution.status != "completed":
+                raise ContractViolation(
+                    "trusted observation requires a completed model execution"
+                )
+            plan_receipts = receipt_store.receipts_for(plan.plan_id)
+            prior_trusted = tuple(
+                receipt
+                for receipt in plan_receipts
+                if receipt.kind == "trusted_jlens_observation"
+            )
+            if len(prior_trusted) > 1:
+                raise ContractViolation(
+                    "plan has multiple trusted JLens observation receipts"
+                )
+            if prior_trusted:
+                stored = prior_trusted[0]
+            else:
+                receipt, artifact = trusted_observation_issuer.issue(
+                    plan,
+                    plan_receipts,
+                )
+                stored = receipt_store.append(receipt, artifact)
+            trusted = tuple(
+                envelope
+                for envelope in observer_hub.observe(stored)
+                if envelope.observer_id == "trusted-jlens-v1"
+            )
+            if len(trusted) != 1:
+                raise ContractViolation(
+                    "trusted observation issuer requires trusted-jlens-v1 observer"
+                )
+
     if not terminal_replay:
         statuses = {execution.status for execution in executions}
         if statuses == {"completed"}:
@@ -230,9 +277,7 @@ def run_skill_paired_campaign(
 
     claim_rows: list[Claim] = []
     for baseline, taught in plan_pairs:
-        baseline_native = _native_evidence(
-            baseline, receipt_store, observer_hub
-        )
+        baseline_native = _native_evidence(baseline, receipt_store, observer_hub)
         taught_native = _native_evidence(taught, receipt_store, observer_hub)
         native_pair = align_native_pair(baseline_native, taught_native)
         evaluator_failed = any(
@@ -252,9 +297,7 @@ def run_skill_paired_campaign(
                     baseline, receipt_store, observer_hub
                 ),
                 baseline_native_evidence=baseline_native,
-                taught_model_receipt=_only_plan_receipt(
-                    taught, receipt_store, "model"
-                ),
+                taught_model_receipt=_only_plan_receipt(taught, receipt_store, "model"),
                 taught_external_evidence=_external_evidence(
                     taught, receipt_store, observer_hub
                 ),
@@ -298,9 +341,22 @@ def run_skill_paired_campaign(
         ),
         8,
     )
-    budget_spent_cny = float(
-        spec.report_metadata.get("actual_api_spend_cny", runtime_spend_cny)
-    )
+    budget_ledger_event_count = 0
+    budget_ledger_head_sha256: str | None = None
+    budget_limit: float | None = None
+    if budget_ledger is not None:
+        ledger_events = budget_ledger.events()
+        ledger_snapshot = budget_ledger.snapshot()
+        budget_spent_cny = ledger_snapshot.spent_cost_cny
+        budget_limit = ledger_snapshot.max_cost_cny
+        budget_ledger_event_count = len(ledger_events)
+        budget_ledger_head_sha256 = str(ledger_events[-1]["event_sha256"])
+        budget_integrity_status = (
+            "validated" if 0 <= budget_spent_cny <= budget_limit else "exceeded"
+        )
+    else:
+        budget_spent_cny = runtime_spend_cny
+        budget_integrity_status = "recorded"
     promotion_decision = governance_service.decide(
         candidate=candidate,
         evidence=evidence_state,
@@ -339,7 +395,28 @@ def run_skill_paired_campaign(
             "candidate_revision_id": candidate.revision_id,
             "evidence_grade_reached": str(evidence_state.grade),
             "e3_eligible": evidence_state.e3_eligible,
+            "e2_lineage_status": (
+                "validated"
+                if claims
+                and all(
+                    claim.counterfactual_pair_sha256 is not None
+                    and len(claim.counterfactual_receipt_ids) == 6
+                    for claim in claims
+                )
+                else "incomplete"
+            ),
+            "e2_counterfactual_receipt_count": sum(
+                len(claim.counterfactual_receipt_ids) for claim in claims
+            ),
+            "e3_trust_status": (
+                "validated_observed"
+                if evidence_state.e3_eligible
+                else "guarded_not_observed"
+            ),
+            "e3_trusted_evidence_count": len(evidence_state.prediction_evidence_ids)
+            // 3,
             "promotion_status": str(promotion_decision.gate_decision),
+            "governance_status": str(promotion_decision.gate_decision),
             "promotion_decision_id": promotion_decision.decision_id,
             "capability_id": (
                 capability.capability_id if capability is not None else None
@@ -360,7 +437,17 @@ def run_skill_paired_campaign(
                 else "not_validated"
             ),
             "empirical_gain_status": evidence_state.classification,
+            "actual_api_spend_cny": budget_spent_cny,
+            "api_budget_limit_cny": budget_limit,
+            "api_budget_remaining_cny": (
+                round(budget_limit - budget_spent_cny, 8)
+                if budget_limit is not None
+                else None
+            ),
             "budget_spent_cny": budget_spent_cny,
+            "budget_integrity_status": budget_integrity_status,
+            "budget_ledger_event_count": budget_ledger_event_count,
+            "budget_ledger_head_sha256": budget_ledger_head_sha256,
             "full_v3_release_status": "incomplete",
             "unresolved_findings": [
                 *(
@@ -438,6 +525,13 @@ def _validate_admission(
         raise ContractViolation("live Skill campaign task revisions must be unique")
     if set(spec.task_execution_metadata) != {task.revision_id for task in tasks}:
         raise ContractViolation("live Skill campaign metadata must cover every task")
+    if spec.mechanism_prediction is not None and (
+        spec.mechanism_prediction.candidate_revision_id != spec.candidate_revision_id
+        or spec.mechanism_prediction.mechanism_id != spec.mechanism_id
+    ):
+        raise ContractViolation(
+            "mechanism prediction does not match campaign candidate"
+        )
     snapshot = controller.snapshot()
     if snapshot.campaign_id != spec.campaign_id:
         raise ContractViolation("campaign spec does not match controller")

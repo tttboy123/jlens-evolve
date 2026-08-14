@@ -4,17 +4,21 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from evolve.contracts import ContractViolation
+from evolve.evidence import ReceiptStore
 from evolve.fresh_feedback import (
     _build_tasks,
     _launcher,
     _load_config,
     _require_clean_head,
+    _trusted_jlens_runtime,
     seal_run,
 )
+from evolve.proposals import CompiledRevision
 
 
 def _git(root: Path, *args: str) -> str:
@@ -81,6 +85,24 @@ def test_fresh_config_denies_legacy_frozen_skill_fallbacks(
 
     with pytest.raises(ContractViolation, match="fallback"):
         _load_config(path)
+
+
+def test_trusted_jlens_requires_a_process_local_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("JLENS_TEST_SECRET", raising=False)
+    config = {
+        "trusted_jlens": {
+            "secret_env": "JLENS_TEST_SECRET",
+        }
+    }
+
+    with pytest.raises(ContractViolation, match="environment variable is missing"):
+        _trusted_jlens_runtime(
+            config=config,
+            compiled=cast(CompiledRevision, object()),
+            receipt_store=ReceiptStore(tmp_path / "receipts"),
+        )
 
 
 def test_build_tasks_binds_exact_clean_git_tree_and_feedback_identity(
