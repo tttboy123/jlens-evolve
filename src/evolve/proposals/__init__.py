@@ -213,6 +213,9 @@ class CandidateProposer:
         result_id = f"teacher-result:{request_id}"
         request_path = self.root / request_id / "TEACHER-REQUEST.json"
         response_path = self.root / request_id / "TEACHER-RESPONSE.json"
+        raw_response_path = (
+            self.root / request_id / "TEACHER-RAW-RESPONSE.json"
+        )
         if response_path.is_file():
             expected_request = canonical_json(request) + "\n"
             try:
@@ -230,18 +233,31 @@ class CandidateProposer:
             )
             return result
         _freeze_request(request_path, request)
-        dispatched, raw = self.cost_ledger.dispatch_once(
-            reservation_id,
-            cost_cny=reservation,
-            model_calls=1,
-            dispatch=lambda: self.transport(request),
-        )
-        if not dispatched:
-            raise ContractViolation(
-                "paid Teacher reservation has no response; manual reconcile required"
+        if raw_response_path.is_file():
+            try:
+                raw = json.loads(raw_response_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise ContractViolation(
+                    "frozen raw Teacher response is unreadable"
+                ) from error
+            if not isinstance(raw, dict):
+                raise ContractViolation(
+                    "frozen raw Teacher response must be an object"
+                )
+        else:
+            dispatched, raw = self.cost_ledger.dispatch_once(
+                reservation_id,
+                cost_cny=reservation,
+                model_calls=1,
+                dispatch=lambda: self.transport(request),
             )
-        if raw is None:
-            raise ContractViolation("paid Teacher dispatch returned no response")
+            if not dispatched:
+                raise ContractViolation(
+                    "paid Teacher reservation has no response; manual reconcile required"
+                )
+            if raw is None:
+                raise ContractViolation("paid Teacher dispatch returned no response")
+            _atomic_write(raw_response_path, raw)
         try:
             choices = raw["choices"]
             usage = raw["usage"]
@@ -258,7 +274,6 @@ class CandidateProposer:
             content_text = message.get("content")
             if not isinstance(content_text, str):
                 raise TypeError("Teacher response content is invalid")
-            content = json.loads(content_text)
             input_tokens = int(usage["prompt_tokens"])
             output_tokens = int(usage["completion_tokens"])
         except (
@@ -266,15 +281,30 @@ class CandidateProposer:
             IndexError,
             TypeError,
             ValueError,
-            json.JSONDecodeError,
         ) as exc:
+            self.cost_ledger.record(
+                reservation_id,
+                result_id=result_id,
+                actual_cost_cny=reservation,
+                actual_model_calls=1,
+            )
             raise ContractViolation("teacher response contract is invalid") from exc
-        content, schema_version = _validate_teacher_candidate(content)
         cost = round(
             (input_tokens * self.pricing.input + output_tokens * self.pricing.output)
             / 1_000_000,
             8,
         )
+        self.cost_ledger.record(
+            reservation_id,
+            result_id=result_id,
+            actual_cost_cny=cost,
+            actual_model_calls=1,
+        )
+        try:
+            content = json.loads(content_text)
+        except json.JSONDecodeError as exc:
+            raise ContractViolation("teacher response contract is invalid") from exc
+        content, schema_version = _validate_teacher_candidate(content)
         payload = {
             "schema_version": schema_version,
             "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
@@ -295,6 +325,9 @@ class CandidateProposer:
                 "output": self.pricing.output,
             },
             "estimated_cost_cny": cost,
+            "raw_response_sha256": hashlib.sha256(
+                raw_response_path.read_bytes()
+            ).hexdigest(),
         }
         payload["candidate_sha256"] = hashlib.sha256(
             canonical_json(content).encode("utf-8")
@@ -304,12 +337,6 @@ class CandidateProposer:
         ).hexdigest()
         _atomic_write(response_path, payload)
         result = self._load_result(request_path, response_path)
-        self.cost_ledger.record(
-            reservation_id,
-            result_id=result_id,
-            actual_cost_cny=result.usage.estimated_cost_cny,
-            actual_model_calls=1,
-        )
         return result
 
     def _load_result(self, request_path: Path, response_path: Path) -> ProposalResult:
@@ -338,6 +365,17 @@ class CandidateProposer:
             != hashlib.sha256(request_path.read_bytes()).hexdigest()
         ):
             raise ContractViolation("frozen teacher request hash mismatch")
+        raw_response_sha256 = payload.get("raw_response_sha256")
+        if raw_response_sha256 is not None:
+            raw_response_path = response_path.with_name(
+                "TEACHER-RAW-RESPONSE.json"
+            )
+            if (
+                not raw_response_path.is_file()
+                or raw_response_sha256
+                != hashlib.sha256(raw_response_path.read_bytes()).hexdigest()
+            ):
+                raise ContractViolation("frozen raw teacher response hash mismatch")
         try:
             candidate_payload = dict(payload["candidate"])
         except (KeyError, TypeError, ValueError) as error:

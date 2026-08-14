@@ -227,3 +227,70 @@ def test_teacher_proposer_never_redispatches_unreconciled_reservation(
             max_output_tokens=1000,
         )
     assert calls == 1
+
+
+def test_teacher_proposer_freezes_and_charges_invalid_provider_response(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def invalid_candidate(_request: dict[str, object]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "model": "deepseek-v4-flash",
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "protocol": "missing-required-fields",
+                            }
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 500},
+        }
+
+    root = tmp_path / "teacher"
+    proposer = CandidateProposer(
+        root=root,
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        transport=invalid_candidate,
+        pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        hard_budget_cny=10.0,
+    )
+
+    with pytest.raises(ContractViolation, match="candidate fields"):
+        proposer.propose(
+            request_id="invalid-candidate",
+            failure_package={"failures": ["unresolved"]},
+            max_output_tokens=1000,
+        )
+
+    raw_response = (
+        root / "invalid-candidate" / "TEACHER-RAW-RESPONSE.json"
+    )
+    assert raw_response.is_file()
+    assert not (root / "invalid-candidate" / "TEACHER-RESPONSE.json").exists()
+    assert proposer.cost_ledger.snapshot().spent_cost_cny == 0.006
+    assert proposer.cost_ledger.snapshot().reserved_cost_cny == 0
+
+    restarted = CandidateProposer(
+        root=root,
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        transport=lambda _request: pytest.fail("must replay raw response"),
+        pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        hard_budget_cny=10.0,
+    )
+    with pytest.raises(ContractViolation, match="candidate fields"):
+        restarted.propose(
+            request_id="invalid-candidate",
+            failure_package={"failures": ["unresolved"]},
+            max_output_tokens=1000,
+        )
+    assert calls == 1
+    assert restarted.cost_ledger.snapshot().spent_cost_cny == 0.006
