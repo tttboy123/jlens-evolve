@@ -20,7 +20,9 @@ class GoalRunStatus(StrEnum):
     NO_PROGRESS = "no_progress"
     BUDGET_EXHAUSTED = "budget_exhausted"
     MAX_ROUNDS_REACHED = "max_rounds_reached"
-    BLOCKED_INFRASTRUCTURE = "blocked_infrastructure"
+    MAX_CONSECUTIVE_INFRA_FAILURES = "max_consecutive_infra_failures"
+    MAX_SAME_FAILURE_SIGNATURE = "max_same_failure_signature"
+    DISK_LIMIT = "disk_limit"
     STOPPED_BY_USER = "stopped_by_user"
     BLOCKED_INTEGRITY = "blocked_integrity"
 
@@ -37,6 +39,8 @@ class GoalState:
     native_gain_task_ids: tuple[str, ...]
     best_candidate_revision_id: str | None
     best_bundle_sha256: str | None
+    same_failure_signature_sha256: str | None = None
+    same_failure_signature_rounds: int = 0
 
 
 class GoalStateStore:
@@ -61,10 +65,13 @@ class GoalStateStore:
             return state
         try:
             row = json.loads(self.path.read_text(encoding="utf-8"))
+            raw_status = row["status"]
+            if raw_status == "blocked_infrastructure":
+                raw_status = "max_consecutive_infra_failures"
             state = GoalState(
                 schema_version=int(row["schema_version"]),
                 goal_id=str(row["goal_id"]),
-                status=GoalRunStatus(row["status"]),
+                status=GoalRunStatus(raw_status),
                 next_round_index=int(row["next_round_index"]),
                 rounds_completed=int(row["rounds_completed"]),
                 no_progress_rounds=int(row["no_progress_rounds"]),
@@ -72,6 +79,12 @@ class GoalStateStore:
                 native_gain_task_ids=tuple(row["native_gain_task_ids"]),
                 best_candidate_revision_id=row["best_candidate_revision_id"],
                 best_bundle_sha256=row["best_bundle_sha256"],
+                same_failure_signature_sha256=row.get(
+                    "same_failure_signature_sha256"
+                ),
+                same_failure_signature_rounds=int(
+                    row.get("same_failure_signature_rounds", 0)
+                ),
             )
         except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:
             raise AutonomousEvolutionError("evolution state is invalid") from error

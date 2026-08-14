@@ -141,6 +141,30 @@ def test_goal_state_uses_only_product_stop_states_and_resumes_active(
         "waiting_user_message",
     }
     assert forbidden.isdisjoint(status.value for status in GoalRunStatus)
+    assert {
+        "max_consecutive_infra_failures",
+        "max_same_failure_signature",
+        "disk_limit",
+    }.issubset(status.value for status in GoalRunStatus)
+
+
+def test_goal_config_accepts_explicit_autonomous_stop_limits(tmp_path: Path) -> None:
+    path = _config(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["goal"].update(
+        {
+            "max_consecutive_infra_failures": 4,
+            "max_same_failure_signature": 6,
+            "disk_limit_bytes": 123456,
+        }
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    goal = AutonomousEvolutionConfig.load(path).goal
+
+    assert goal.max_consecutive_infra_failures == 4
+    assert goal.max_same_failure_signature == 6
+    assert goal.disk_limit_bytes == 123456
 
 
 def test_feedback_selector_rotates_three_tasks_across_two_projects_and_replays(

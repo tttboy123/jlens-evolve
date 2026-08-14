@@ -18,7 +18,8 @@ Copy `configs/AUTONOMOUS-EVOLUTION-CONFIG.example.json` and provide:
 - pinned official harness and evaluator paths;
 - a Teacher provider, model, endpoint, API-key environment-variable name, and
   total CNY budget;
-- a goal, maximum rounds, no-progress patience, and deterministic seed.
+- a goal, maximum rounds, no-progress patience, infrastructure/failure/disk
+  stop limits, and deterministic seed.
 
 The task-pool file is either a JSON list of task objects or an object with
 `tasks` and `runtime`. Real local-Qwen/native execution requires `runtime`:
@@ -97,17 +98,32 @@ PYTHONPATH=src python3 -m evolve verify-manifest \
   --root /absolute/path/to/evolution-run
 ```
 
-Load the paths in `best/BEST-HARNESS.json` with the same frozen model. Baseline
-in the next round loads this Harness as the parent; the proposed Candidate is
-only consumed by taught execution. `active` remains `false`: Governance does not
-auto-activate a Skill or Capability.
+Load and hash-verify the projection with the same frozen model identity:
+
+```python
+from evolve.autonomous import load_best_harness
+
+compiled = load_best_harness(
+    "/absolute/path/to/run/best/BEST-HARNESS.json",
+    expected_model_identity_sha256="<GOAL.json:model_identity_sha256>",
+)
+```
+
+`compiled is None` means the current best is the explicit `empty-harness-v1`;
+otherwise it is a fully reloadable `CompiledRevision`, including its frozen
+Teacher request/response, compile spec, cost/model receipts, Candidate,
+Skill/Operator/Router and optional Memory Policy. Baseline in the next round
+loads this Harness as the parent; the proposed Candidate is only consumed by
+taught execution. `active` remains `false`: Governance does not auto-activate a
+Skill or Capability.
 
 ## Stop conditions and safety
 
-The loop stops only for goal reached, maximum rounds, no progress, exhausted
-Teacher budget, repeated evaluator infrastructure failure, integrity failure, or
-an explicit process stop. A normal round immediately advances without waiting
-for Codex or a user message.
+The loop stops only for `goal_reached`, `max_rounds_reached`, `no_progress`,
+`budget_exhausted`, `max_consecutive_infra_failures`,
+`max_same_failure_signature`, `disk_limit`, `stopped_by_user`, or
+`blocked_integrity`. The three numeric safety limits are configured in `goal`.
+A normal round immediately advances without waiting for Codex or a user message.
 
 Confirm `holdout_opened=false` and `skill_active=false` in
 `EVOLUTION-RESULT.json`, and inspect every task's `cohort` in the frozen task
@@ -121,7 +137,11 @@ python3 -m evolve campaign import --strategy legacy --config IMPORT.json --outpu
 python3 -m evolve campaign run --strategy agent-program --config PROGRAM.json --output RUN
 ```
 
-Skill-paired is live. Legacy import is a compatibility path. AgentProgram uses
-the common Strategy and CampaignRunner contracts but deliberately returns
-`not-yet-live` (exit code 2) until a tournament authority adapter exists. The
-project does not claim that all three are live.
+Skill-paired is live. Legacy import is a read-only compatibility campaign.
+AgentProgram is live only for an explicit deterministic `execution_profile` of
+`fixture`: it loads complete hash-verified Program revisions, executes every
+parent/candidate through the common `ExecutionRuntime`, records inactive
+AgentProgram Registry rows, and advances a hash-bound search parent. Fixture
+tournaments always report `claims=[]`, `native_gain_claimed=false`, and
+`promotion_eligible=false`; non-fixture AgentProgram execution remains
+`not-yet-live` rather than silently falling back.

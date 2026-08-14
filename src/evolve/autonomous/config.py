@@ -20,6 +20,22 @@ def _object(name: str, value: object, fields: set[str]) -> Mapping[str, Any]:
     return value
 
 
+def _object_with_optional(
+    name: str,
+    value: object,
+    *,
+    required: set[str],
+    optional: set[str],
+) -> Mapping[str, Any]:
+    if (
+        not isinstance(value, Mapping)
+        or not required.issubset(value)
+        or not set(value).issubset(required | optional)
+    ):
+        raise AutonomousEvolutionError(f"{name} fields are invalid")
+    return value
+
+
 def _text(name: str, value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise AutonomousEvolutionError(f"{name} must be non-empty text")
@@ -50,6 +66,9 @@ class GoalConfig:
     target_native_gains: int
     max_rounds: int
     no_progress_patience: int
+    max_consecutive_infra_failures: int
+    max_same_failure_signature: int
+    disk_limit_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,15 +132,21 @@ class AutonomousEvolutionConfig:
             raise AutonomousEvolutionError(
                 "autonomous evolution config schema is unsupported"
             )
-        goal_row = _object(
+        goal_fields = {
+            "goal_id",
+            "description",
+            "target_native_gains",
+            "max_rounds",
+            "no_progress_patience",
+        }
+        goal_row = _object_with_optional(
             "goal",
             root["goal"],
-            {
-                "goal_id",
-                "description",
-                "target_native_gains",
-                "max_rounds",
-                "no_progress_patience",
+            required=goal_fields,
+            optional={
+                "max_consecutive_infra_failures",
+                "max_same_failure_signature",
+                "disk_limit_bytes",
             },
         )
         model_row = _object(
@@ -222,6 +247,18 @@ class AutonomousEvolutionConfig:
                 max_rounds=_positive_int("goal.max_rounds", goal_row["max_rounds"]),
                 no_progress_patience=_positive_int(
                     "goal.no_progress_patience", goal_row["no_progress_patience"]
+                ),
+                max_consecutive_infra_failures=_positive_int(
+                    "goal.max_consecutive_infra_failures",
+                    goal_row.get("max_consecutive_infra_failures", 3),
+                ),
+                max_same_failure_signature=_positive_int(
+                    "goal.max_same_failure_signature",
+                    goal_row.get("max_same_failure_signature", 5),
+                ),
+                disk_limit_bytes=_positive_int(
+                    "goal.disk_limit_bytes",
+                    goal_row.get("disk_limit_bytes", 10 * 1024 * 1024 * 1024),
                 ),
             ),
             model=ModelConfig(

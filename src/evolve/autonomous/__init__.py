@@ -10,6 +10,7 @@ from .config import (
     TeacherConfig,
 )
 from .goal import GoalRunStatus, GoalState, GoalStateStore
+from .output import load_best_harness
 from .runner import (
     AutonomousEvolutionRunner,
     BaselineProbeResult,
@@ -41,4 +42,5 @@ __all__ = [
     "TaskSelection",
     "TeacherConfig",
     "build_default_dependencies",
+    "load_best_harness",
 ]

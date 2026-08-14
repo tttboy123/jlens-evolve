@@ -232,6 +232,10 @@ class AutonomousEvolutionRunner:
         for current_round in range(
             state.next_round_index, self.config.goal.max_rounds
         ):
+            if _directory_size(self.output_root) >= self.config.goal.disk_limit_bytes:
+                state = replace(state, status=GoalRunStatus.DISK_LIMIT)
+                self.state_store.write(state)
+                return self._write_result(state, proposer=proposer)
             round_root = self.output_root / "rounds" / f"round-{current_round:04d}"
             round_root.mkdir(parents=True, exist_ok=True)
             selection = self.selector.select(
@@ -413,6 +417,17 @@ class AutonomousEvolutionRunner:
                 round_root / "CAMPAIGN-RESULT.json", dict(campaign_result)
             )
             claim_rows = [asdict(claim) for claim in claims]
+            failure_signature_sha256 = hashlib.sha256(
+                canonical_json(
+                    [dict(row) for row in baseline.failure_signatures]
+                ).encode("utf-8")
+            ).hexdigest()
+            same_failure_rounds = (
+                state.same_failure_signature_rounds + 1
+                if state.same_failure_signature_sha256
+                == failure_signature_sha256
+                else 1
+            )
             fitness = _fitness(claims)
             accepted = _acceptable_advance(claims) and (
                 best_fitness is None or fitness > best_fitness
@@ -462,6 +477,7 @@ class AutonomousEvolutionRunner:
                 "best_candidate_revision_id": best_revision,
                 "best_bundle_sha256": best_bundle,
                 "campaign_status": campaign_result.get("campaign_status"),
+                "failure_signature_sha256": failure_signature_sha256,
             }
             freeze_json(
                 round_root / "AUTONOMOUS-ROUND-RESULT.json", round_payload
@@ -482,14 +498,28 @@ class AutonomousEvolutionRunner:
                 native_gain_task_ids=tuple(sorted(gained_tasks)),
                 best_candidate_revision_id=best_revision,
                 best_bundle_sha256=best_bundle,
+                same_failure_signature_sha256=failure_signature_sha256,
+                same_failure_signature_rounds=same_failure_rounds,
             )
             if len(gained_tasks) >= self.config.goal.target_native_gains:
                 state = replace(state, status=GoalRunStatus.GOAL_REACHED)
             elif no_progress >= self.config.goal.no_progress_patience:
                 state = replace(state, status=GoalRunStatus.NO_PROGRESS)
-            elif consecutive_infra >= 3:
+            elif (
+                consecutive_infra
+                >= self.config.goal.max_consecutive_infra_failures
+            ):
                 state = replace(
-                    state, status=GoalRunStatus.BLOCKED_INFRASTRUCTURE
+                    state,
+                    status=GoalRunStatus.MAX_CONSECUTIVE_INFRA_FAILURES,
+                )
+            elif (
+                same_failure_rounds
+                >= self.config.goal.max_same_failure_signature
+            ):
+                state = replace(
+                    state,
+                    status=GoalRunStatus.MAX_SAME_FAILURE_SIGNATURE,
                 )
             self.state_store.write(state)
             if state.status is not GoalRunStatus.ACTIVE:
@@ -601,11 +631,22 @@ class AutonomousEvolutionRunner:
         }
         tail_no_progress = 0
         tail_infra = 0
+        tail_failure_signature: str | None = None
+        tail_same_failure = 0
         for row in reversed(rows):
             payload = row["payload"]
             if payload.get("accepted_as_best"):
                 break
             tail_no_progress += 1
+        for row in reversed(rows):
+            signature = row["payload"].get("failure_signature_sha256")
+            if not isinstance(signature, str):
+                break
+            if tail_failure_signature is None:
+                tail_failure_signature = signature
+            if signature != tail_failure_signature:
+                break
+            tail_same_failure += 1
         for row in reversed(rows):
             claims = row["payload"].get("claims", ())
             if claims and all(
@@ -626,13 +667,23 @@ class AutonomousEvolutionRunner:
             native_gain_task_ids=tuple(sorted(gained)),
             best_candidate_revision_id=last.get("best_candidate_revision_id"),
             best_bundle_sha256=last.get("best_bundle_sha256"),
+            same_failure_signature_sha256=tail_failure_signature,
+            same_failure_signature_rounds=tail_same_failure,
         )
         if len(gained) >= self.config.goal.target_native_gains:
             return replace(recovered, status=GoalRunStatus.GOAL_REACHED)
         if tail_no_progress >= self.config.goal.no_progress_patience:
             return replace(recovered, status=GoalRunStatus.NO_PROGRESS)
-        if tail_infra >= 3:
-            return replace(recovered, status=GoalRunStatus.BLOCKED_INFRASTRUCTURE)
+        if tail_infra >= self.config.goal.max_consecutive_infra_failures:
+            return replace(
+                recovered,
+                status=GoalRunStatus.MAX_CONSECUTIVE_INFRA_FAILURES,
+            )
+        if tail_same_failure >= self.config.goal.max_same_failure_signature:
+            return replace(
+                recovered,
+                status=GoalRunStatus.MAX_SAME_FAILURE_SIGNATURE,
+            )
         return recovered
 
     def _terminal_result(self, state: GoalState) -> dict[str, Any]:
@@ -714,6 +765,14 @@ class _ReplayState:
     best_fitness: int | None
     best_round_root: Path | None
     best_candidate_id: str | None
+
+
+def _directory_size(root: Path) -> int:
+    total = 0
+    for path in root.rglob("*"):
+        if path.is_file():
+            total += path.stat().st_size
+    return total
 
 
 def _selection_payload(selection: TaskSelection) -> dict[str, Any]:

@@ -578,6 +578,82 @@ def test_candidate_task_lineage_tamper_blocks_integrity_and_never_advances_best(
     assert (output / "rounds/round-0000/INTEGRITY-BLOCK.json").is_file()
 
 
+def test_public_cli_stops_at_disk_limit_before_teacher_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    config_path = _config(tmp_path)
+    config = json.loads(config_path.read_text())
+    config["goal"]["disk_limit_bytes"] = 1
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    output = tmp_path / "disk-limited-output"
+
+    assert main(
+        [
+            "autonomous-evolve",
+            "--config",
+            str(config_path),
+            "--output",
+            str(output),
+            "--worktree-root",
+            str(worktree),
+        ]
+    ) == 0
+
+    assert teacher_requests == []
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "disk_limit"
+    assert result["rounds_completed"] == 0
+
+
+def test_public_cli_stops_on_repeated_failure_signature_without_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    config_path = _config(tmp_path)
+    config = json.loads(config_path.read_text())
+    config["goal"]["max_same_failure_signature"] = 1
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    output = tmp_path / "same-failure-output"
+
+    assert main(
+        [
+            "autonomous-evolve",
+            "--config",
+            str(config_path),
+            "--output",
+            str(output),
+            "--worktree-root",
+            str(worktree),
+        ]
+    ) == 0
+
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "max_same_failure_signature"
+    assert result["rounds_completed"] == 1
+    assert len(teacher_requests) == 1
+
+
 def test_cli_help_exposes_only_the_product_entry(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

@@ -5,7 +5,10 @@
     "description": "Improve declaration localization without changing model weights.",
     "target_native_gains": 3,
     "max_rounds": 20,
-    "no_progress_patience": 5
+    "no_progress_patience": 5,
+    "max_consecutive_infra_failures": 3,
+    "max_same_failure_signature": 5,
+    "disk_limit_bytes": 10737418240
   },
   "model": {
     "provider": "local-mlx",
