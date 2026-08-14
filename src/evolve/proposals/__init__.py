@@ -8,14 +8,16 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from evolve.contracts import ContractViolation, canonical_json
 from evolve.kernel import DurableCostLedger
+from evolve.teachers import TeacherTransport
 
 from .candidate_chain import (
     CandidateChangeSet,
     CandidateCompiler,
+    CompiledMemoryPolicy,
     CompiledOperator,
     CompiledRevision,
     CompiledRouter,
@@ -38,6 +40,13 @@ class ProposalCandidate:
     skill_text: str
     eval_note: str
     active: bool = False
+    operator: Mapping[str, object] | None = None
+    router: Mapping[str, object] | None = None
+    memory_policy: Mapping[str, object] | None = None
+    preconditions: tuple[object, ...] = ()
+    expected_external_effect: object | None = None
+    expected_internal_effect: object | None = None
+    falsification: object | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +66,63 @@ class ProposalResult:
     response_path: Path
 
 
-Transport = Callable[[dict[str, object]], dict[str, object]]
+Transport = TeacherTransport
+
+_V1_CANDIDATE_FIELDS = {
+    "protocol",
+    "prompt_template",
+    "skill_text",
+    "eval_note",
+}
+_V2_CANDIDATE_FIELDS = _V1_CANDIDATE_FIELDS | {
+    "operator",
+    "router",
+    "memory_policy",
+    "preconditions",
+    "expected_external_effect",
+    "expected_internal_effect",
+    "falsification",
+}
+
+
+def _validate_teacher_candidate(content: object) -> tuple[dict[str, object], int]:
+    if not isinstance(content, dict):
+        raise ContractViolation("teacher candidate fields are invalid")
+    fields = set(content)
+    if fields == _V1_CANDIDATE_FIELDS:
+        schema_version = 1
+    elif fields == _V2_CANDIDATE_FIELDS:
+        schema_version = 2
+    else:
+        raise ContractViolation("teacher candidate fields are invalid")
+    for name in _V1_CANDIDATE_FIELDS:
+        value = content.get(name)
+        if not isinstance(value, str) or not value.strip():
+            raise ContractViolation(f"teacher candidate {name} must be non-empty text")
+    if schema_version == 2:
+        for name in ("operator", "router"):
+            value = content.get(name)
+            if not isinstance(value, Mapping) or not value:
+                raise ContractViolation(f"teacher candidate {name} must be an object")
+        memory_policy = content.get("memory_policy")
+        if memory_policy is not None and (
+            not isinstance(memory_policy, Mapping) or not memory_policy
+        ):
+            raise ContractViolation(
+                "teacher candidate memory_policy must be an object or null"
+            )
+        preconditions = content.get("preconditions")
+        if not isinstance(preconditions, list) or not preconditions:
+            raise ContractViolation("teacher candidate preconditions must be a list")
+        for name in (
+            "expected_external_effect",
+            "expected_internal_effect",
+            "falsification",
+        ):
+            value = content.get(name)
+            if value is None or value == "" or value == [] or value == {}:
+                raise ContractViolation(f"teacher candidate {name} must be non-empty")
+    return dict(content), schema_version
 
 
 def _atomic_write(path: Path, payload: Mapping[str, Any]) -> None:
@@ -204,16 +269,14 @@ class CandidateProposer:
             json.JSONDecodeError,
         ) as exc:
             raise ContractViolation("teacher response contract is invalid") from exc
-        fields = {"protocol", "prompt_template", "skill_text", "eval_note"}
-        if not isinstance(content, dict) or set(content) != fields:
-            raise ContractViolation("teacher candidate fields are invalid")
+        content, schema_version = _validate_teacher_candidate(content)
         cost = round(
             (input_tokens * self.pricing.input + output_tokens * self.pricing.output)
             / 1_000_000,
             8,
         )
         payload = {
-            "schema_version": 1,
+            "schema_version": schema_version,
             "request_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
             "provider": self.provider,
             "model": self.model,
@@ -233,6 +296,12 @@ class CandidateProposer:
             },
             "estimated_cost_cny": cost,
         }
+        payload["candidate_sha256"] = hashlib.sha256(
+            canonical_json(content).encode("utf-8")
+        ).hexdigest()
+        payload["receipt_sha256"] = hashlib.sha256(
+            canonical_json(payload).encode("utf-8")
+        ).hexdigest()
         _atomic_write(response_path, payload)
         result = self._load_result(request_path, response_path)
         self.cost_ledger.record(
@@ -244,43 +313,108 @@ class CandidateProposer:
         return result
 
     def _load_result(self, request_path: Path, response_path: Path) -> ProposalResult:
-        payload = json.loads(response_path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(response_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ContractViolation("frozen teacher response is unreadable") from error
+        if not isinstance(payload, dict):
+            raise ContractViolation("frozen teacher response must be an object")
         if (
-            payload["request_sha256"]
+            "candidate_status" in payload
+            and payload.get("candidate_status") != "inactive"
+        ) or ("auto_activate" in payload and payload.get("auto_activate") is not False):
+            raise ContractViolation("Teacher candidate must remain inactive")
+        receipt_sha256 = payload.get("receipt_sha256")
+        if receipt_sha256 is not None:
+            unsigned = {
+                key: value for key, value in payload.items() if key != "receipt_sha256"
+            }
+            if receipt_sha256 != hashlib.sha256(
+                canonical_json(unsigned).encode("utf-8")
+            ).hexdigest():
+                raise ContractViolation("frozen teacher response hash mismatch")
+        if (
+            payload.get("request_sha256")
             != hashlib.sha256(request_path.read_bytes()).hexdigest()
         ):
             raise ContractViolation("frozen teacher request hash mismatch")
-        candidate_payload = dict(payload["candidate"])
+        try:
+            candidate_payload = dict(payload["candidate"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ContractViolation("frozen teacher candidate is invalid") from error
         if {"candidate_id", "active"} <= candidate_payload.keys():
-            candidate = ProposalCandidate(**candidate_payload)
-            usage_payload = payload["usage"]
-            usage = ProposalUsage(
-                provider=payload["provider"],
-                model=payload["model"],
-                input_tokens=usage_payload["input_tokens"],
-                output_tokens=usage_payload["output_tokens"],
-                estimated_cost_cny=usage_payload["estimated_cost_cny"],
-            )
+            try:
+                candidate = ProposalCandidate(**candidate_payload)
+                usage_payload = payload["usage"]
+                usage = ProposalUsage(
+                    provider=payload["provider"],
+                    model=payload["model"],
+                    input_tokens=usage_payload["input_tokens"],
+                    output_tokens=usage_payload["output_tokens"],
+                    estimated_cost_cny=usage_payload["estimated_cost_cny"],
+                )
+            except (KeyError, TypeError) as error:
+                raise ContractViolation("frozen v1 candidate is invalid") from error
         else:
+            candidate_payload, _schema_version = _validate_teacher_candidate(
+                candidate_payload
+            )
+            candidate_sha256 = payload.get("candidate_sha256")
+            if candidate_sha256 is not None and candidate_sha256 != hashlib.sha256(
+                canonical_json(candidate_payload).encode("utf-8")
+            ).hexdigest():
+                raise ContractViolation("frozen teacher candidate hash mismatch")
             candidate_id = (
                 "candidate-"
                 + hashlib.sha256(
                     canonical_json(candidate_payload).encode()
                 ).hexdigest()[:16]
             )
+            operator = candidate_payload.get("operator")
+            router = candidate_payload.get("router")
+            memory_policy = candidate_payload.get("memory_policy")
+            preconditions = candidate_payload.get("preconditions", ())
+            assert isinstance(candidate_payload["protocol"], str)
+            assert isinstance(candidate_payload["prompt_template"], str)
+            assert isinstance(candidate_payload["skill_text"], str)
+            assert isinstance(candidate_payload["eval_note"], str)
+            assert isinstance(preconditions, (tuple, list))
             candidate = ProposalCandidate(
                 candidate_id=candidate_id,
-                **candidate_payload,
+                protocol=candidate_payload["protocol"],
+                prompt_template=candidate_payload["prompt_template"],
+                skill_text=candidate_payload["skill_text"],
+                eval_note=candidate_payload["eval_note"],
                 active=False,
+                operator=dict(operator) if isinstance(operator, Mapping) else None,
+                router=dict(router) if isinstance(router, Mapping) else None,
+                memory_policy=(
+                    dict(memory_policy)
+                    if isinstance(memory_policy, Mapping)
+                    else None
+                ),
+                preconditions=tuple(preconditions),
+                expected_external_effect=candidate_payload.get(
+                    "expected_external_effect"
+                ),
+                expected_internal_effect=candidate_payload.get(
+                    "expected_internal_effect"
+                ),
+                falsification=candidate_payload.get("falsification"),
             )
-            usage_payload = payload["usage"]
-            usage = ProposalUsage(
-                provider=payload["provider"],
-                model=payload["model"],
-                input_tokens=usage_payload["prompt_tokens"],
-                output_tokens=usage_payload["completion_tokens"],
-                estimated_cost_cny=payload["estimated_cost_cny"],
-            )
+            try:
+                usage_payload = payload["usage"]
+                usage = ProposalUsage(
+                    provider=payload["provider"],
+                    model=payload["model"],
+                    input_tokens=usage_payload["prompt_tokens"],
+                    output_tokens=usage_payload["completion_tokens"],
+                    estimated_cost_cny=payload["estimated_cost_cny"],
+                )
+            except (KeyError, TypeError) as error:
+                raise ContractViolation("frozen teacher usage is invalid") from error
+        if candidate.active:
+            raise ContractViolation("Teacher candidate must remain inactive")
         return ProposalResult(candidate, usage, request_path, response_path)
 
 
@@ -290,6 +424,7 @@ __all__ = [
     "CandidateProposer",
     "CompileSpec",
     "CompiledOperator",
+    "CompiledMemoryPolicy",
     "CompiledRevision",
     "CompiledRouter",
     "CompiledSkill",
@@ -297,4 +432,6 @@ __all__ = [
     "ProposalCandidate",
     "ProposalResult",
     "ProposalUsage",
+    "TeacherTransport",
+    "Transport",
 ]

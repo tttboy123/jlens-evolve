@@ -147,6 +147,13 @@ def _load_config(path: Path) -> dict[str, Any]:
     trusted_jlens = config.get("trusted_jlens")
     if trusted_jlens is not None and not isinstance(trusted_jlens, dict):
         raise ContractViolation("trusted_jlens must be an object when configured")
+    teacher_budget = config.get("teacher_budget_cny", 10.0)
+    if (
+        isinstance(teacher_budget, bool)
+        or not isinstance(teacher_budget, (int, float))
+        or teacher_budget < 0
+    ):
+        raise ContractViolation("teacher_budget_cny must be non-negative")
     return config
 
 
@@ -382,6 +389,21 @@ def _freeze_harness(config: Mapping[str, Any], output_root: Path) -> Path:
 def _compile_teacher_candidate(*, config: Mapping[str, Any], output_root: Path):
     candidate_id = str(config.get("candidate_id", ""))
     revision_id = str(config.get("candidate_revision_id", ""))
+    parent_revision_id = str(
+        config.get("parent_revision_id", "qwen-zero-teaching-v1")
+    )
+    compiled_root = config.get("compiled_revision_root")
+    if compiled_root is not None:
+        if not isinstance(compiled_root, str) or not compiled_root:
+            raise ContractViolation("compiled_revision_root must be a path")
+        compiled = CompiledRevision.load(Path(compiled_root).expanduser().resolve())
+        if (
+            compiled.change_set.candidate_id != candidate_id
+            or compiled.change_set.revision_id != revision_id
+            or compiled.change_set.parent_revision_id != parent_revision_id
+        ):
+            raise ContractViolation("precompiled candidate lineage identity mismatch")
+        return compiled
     task_ids = tuple(str(row["instance_id"]) for row in config["tasks"])
     operator_id = str(
         config.get("compiled_operator_id", "apply-compiled-teacher-candidate")
@@ -389,7 +411,7 @@ def _compile_teacher_candidate(*, config: Mapping[str, Any], output_root: Path):
     spec = CompileSpec(
         candidate_id=candidate_id,
         revision_id=revision_id,
-        parent_revision_id="qwen-zero-teaching-v1",
+        parent_revision_id=parent_revision_id,
         cohort=Cohort.FEEDBACK,
         operator_id=operator_id,
         operator_instruction=str(
@@ -453,7 +475,11 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
     config = _load_config(config_path.resolve())
     output_root = output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    final_commit = _require_clean_head(Path.cwd())
+    source_root_value = config.get("source_root", str(Path.cwd()))
+    if not isinstance(source_root_value, str) or not source_root_value:
+        raise ContractViolation("fresh campaign source_root must be a path")
+    source_root = Path(source_root_value).expanduser().resolve()
+    final_commit = _require_clean_head(source_root)
     expected_commit = config.get("final_commit_sha")
     if expected_commit != final_commit:
         raise ContractViolation("fresh campaign config is not bound to final HEAD")
@@ -482,10 +508,11 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
     harness_receipt = _freeze_harness(config, output_root)
 
     campaign_id = str(config.get("campaign_id", ""))
+    teacher_budget_limit = float(config.get("teacher_budget_cny", 10.0))
     teacher_ledger = DurableCostLedger(
         output_root / "cost-ledger/events.jsonl",
         campaign_id=campaign_id,
-        max_cost_cny=10.0,
+        max_cost_cny=teacher_budget_limit,
         max_model_calls=1,
     )
     teacher_reservation_id = "teacher-reservation-" + compiled.bundle_sha256[:24]
@@ -552,6 +579,15 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         taskset_path=_path(config, "taskset_path"),
         routes_path=_path(config, "routes_path"),
         compiled_revision_root=compiled.root,
+        **(
+            {
+                "baseline_compiled_revision_root": Path(
+                    str(config["baseline_compiled_revision_root"])
+                ).expanduser().resolve()
+            }
+            if config.get("baseline_compiled_revision_root") is not None
+            else {}
+        ),
     )
     transport = LegacyQwenPairTransport(
         cell_runner=runner, output_root=output_root / "qwen-cells"
@@ -572,7 +608,9 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
     spend = teacher_budget.spent_cost_cny
     spec = LiveCampaignSpec(
         campaign_id=campaign_id,
-        baseline_revision_id="qwen-zero-teaching-v1",
+        baseline_revision_id=str(
+            config.get("baseline_revision_id", "qwen-zero-teaching-v1")
+        ),
         candidate_id=candidate_id,
         candidate_revision_id=candidate_revision,
         candidate_kind="external-skill",
@@ -603,10 +641,10 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         task_execution_metadata=task_metadata,
         report_metadata={
             "outcome": "fresh_runtime_closed_loop",
-            "final_branch": _git(Path.cwd(), "branch", "--show-current"),
+            "final_branch": _git(source_root, "branch", "--show-current"),
             "actual_api_spend_cny": spend,
-            "api_budget_limit_cny": 10.0,
-            "api_budget_remaining_cny": round(10.0 - spend, 8),
+            "api_budget_limit_cny": teacher_budget_limit,
+            "api_budget_remaining_cny": round(teacher_budget_limit - spend, 8),
             "teacher_call_mode": "frozen_real_receipt_replay",
             "teacher_request_sha256": dict(compiled.artifact_sha256)[
                 "TEACHER-REQUEST.json"
@@ -703,8 +741,18 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         "claims": [
             {
                 "task_id": task.task_id,
+                "task_revision_id": task.revision_id,
                 "classification": str(claim.classification),
                 "claim_id": claim.claim_id,
+                "grade": str(claim.grade),
+                "candidate_id": claim.candidate_id,
+                "evidence_ids": list(claim.evidence_ids),
+                "counterfactual_pair_sha256": (
+                    claim.counterfactual_pair_sha256
+                ),
+                "counterfactual_receipt_ids": list(
+                    claim.counterfactual_receipt_ids
+                ),
             }
             for task, claim in zip(tasks, result.claims, strict=True)
         ],

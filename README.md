@@ -21,6 +21,22 @@ PYTHONPATH=src python3 -m evolve verify-manifest \
   --root /absolute/path/to/run
 ```
 
+For continuous feedback-only Skill/Harness evolution from a frozen Model and a
+budgeted Teacher, use:
+
+```bash
+PYTHONPATH=src python3 -m evolve autonomous-evolve \
+  --config /absolute/path/to/AUTONOMOUS-EVOLUTION-CONFIG.json \
+  --output /absolute/path/to/evolution-run \
+  --worktree-root /absolute/path/to/clean/committed/source
+```
+
+See [`docs/AUTONOMOUS-EVOLUTION.md`](docs/AUTONOMOUS-EVOLUTION.md) and the
+example config. The loop automatically selects feedback tasks, runs the current
+best Harness as baseline, compiles the Teacher Candidate, performs real local
+model generation and official matched native evaluation, feeds authoritative
+Claims into the next round, and exports an inactive `BEST-HARNESS.json`.
+
 That command is the sole live orchestration entry. It validates three clean,
 revision-pinned feedback checkouts; freezes the local Qwen and official evaluator
 identities; compiles a byte-frozen DeepSeek request/response into an immutable

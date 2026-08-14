@@ -485,6 +485,28 @@ def test_execution_runtime_stops_before_native_when_actual_cost_exceeds_plan() -
     assert result.receipts[-1].payload["status"] == "budget_exhausted"
 
 
+def test_execution_runtime_prescreen_produces_model_receipt_without_native_claim() -> (
+    None
+):
+    runtime, _, transport, evaluator, _, _ = runtime_fixture()
+    prescreen = replace(
+        plan(plan_id="prescreen-plan", arm="taught"),
+        metadata={"execution_mode": "model-only-prescreen"},
+    )
+
+    result = runtime.execute(prescreen, authorization())
+
+    assert result.status == "completed"
+    assert transport.calls == 1
+    assert evaluator.calls == 0
+    assert any(receipt.kind == "model" for receipt in result.receipts)
+    assert not any(receipt.kind == "native_evaluation" for receipt in result.receipts)
+    assert result.receipts[-1].payload == {
+        "status": "completed",
+        "execution_mode": "model-only-prescreen",
+    }
+
+
 def test_checkpoint_refuses_mutated_payload(tmp_path) -> None:
     checkpoints = CheckpointManager(tmp_path / "checkpoints")
     controller = CampaignController.create(

@@ -59,10 +59,25 @@ def _arm(
             "candidate_bundle_sha256": candidate_bundle_sha256,
         }
     )
+    parent_harness_revision_id = "parent-r1"
+    parent_harness_bundle_sha256 = _sha("parent-harness")
+    parent_harness_prompt = canonical_json(
+        {
+            "revision_id": parent_harness_revision_id,
+            "bundle_sha256": parent_harness_bundle_sha256,
+        }
+    )
+    parent_harness_prompt_sha256 = _sha(parent_harness_prompt)
+    parent_lineage: dict[str, object] = {
+        "parent_harness_revision_id": parent_harness_revision_id,
+        "parent_harness_bundle_sha256": parent_harness_bundle_sha256,
+        "parent_harness_prompt": parent_harness_prompt,
+        "parent_harness_prompt_sha256": parent_harness_prompt_sha256,
+    }
     prompt_text = (
         f"SYSTEM: taught repair\nCOMPILED-CANDIDATE:\n{candidate_prompt}"
         if candidate
-        else "SYSTEM: baseline repair"
+        else f"SYSTEM: baseline repair\nBASELINE-HARNESS:\n{parent_harness_prompt}"
     )
     if prompt_mode == "baseline-leak":
         prompt_text = f"SYSTEM: baseline repair\n{candidate_prompt}"
@@ -94,6 +109,7 @@ def _arm(
             "candidate_consumed": candidate,
             "candidate_revision_id": "candidate-r2" if candidate else None,
             "candidate_bundle_sha256": candidate_bundle_sha256 if candidate else None,
+            **parent_lineage,
             **prompt_lineage,
         },
     )
@@ -109,6 +125,7 @@ def _arm(
             "candidate_consumed": candidate,
             "candidate_revision_id": "candidate-r2" if candidate else None,
             "candidate_bundle_sha256": _sha("candidate") if candidate else None,
+            **parent_lineage,
             **external_prompt_lineage,
         },
     )
@@ -125,6 +142,7 @@ def _arm(
             "model_receipt_id": model.receipt_id,
             "model_artifact_sha256": model.artifact_sha256,
             "prediction_sha256": prediction,
+            **parent_lineage,
             "resolved": resolved,
             "evaluator_error": None,
         },

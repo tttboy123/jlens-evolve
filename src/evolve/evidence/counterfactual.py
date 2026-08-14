@@ -59,6 +59,10 @@ def build_matched_counterfactual_pair(
         identity[field] = baseline_native[field]
     if baseline.campaign_id != taught.campaign_id:
         raise ContractViolation("counterfactual arms have unmatched campaign_id")
+    baseline_parent = _parent_harness_lineage(baseline)
+    taught_parent = _parent_harness_lineage(taught)
+    if baseline_parent != taught_parent:
+        raise ContractViolation("counterfactual arms have unmatched parent harness")
     return MatchedCounterfactualPair(
         candidate_id=candidate_id,
         candidate_revision_id=candidate_revision_id,
@@ -71,6 +75,9 @@ def build_matched_counterfactual_pair(
         execution_config_sha256=str(identity["execution_config_sha256"]),
         baseline=baseline,
         taught=taught,
+        parent_harness_revision_id=baseline_parent[0],
+        parent_harness_bundle_sha256=baseline_parent[1],
+        parent_harness_prompt_sha256=baseline_parent[2],
     )
 
 
@@ -151,6 +158,15 @@ def _build_arm(
             raise ContractViolation(
                 f"{arm} external {field} lineage does not match model"
             )
+    parent_harness = _payload_parent_harness(model.payload, label=f"{arm} model")
+    for label, envelope in (("external", external), ("native", native)):
+        evidence_parent = _payload_parent_harness(
+            envelope.payload, label=f"{arm} {label}"
+        )
+        if evidence_parent != parent_harness:
+            raise ContractViolation(
+                f"{arm} {label} parent harness lineage does not match model"
+            )
     if arm == "baseline":
         if consumed or revision is not None or bundle is not None:
             raise ContractViolation("baseline arm contains candidate lineage")
@@ -182,6 +198,9 @@ def _build_arm(
         candidate_consumed=consumed,
         candidate_revision_id=revision if isinstance(revision, str) else None,
         candidate_bundle_sha256=bundle if isinstance(bundle, str) else None,
+        parent_harness_revision_id=parent_harness[0],
+        parent_harness_bundle_sha256=parent_harness[1],
+        parent_harness_prompt_sha256=parent_harness[2],
     )
 
 
@@ -230,6 +249,19 @@ def _validate_prompt_lineage(
             )
         ):
             raise ContractViolation("baseline prompt leaks candidate projection")
+        parent_prompt = payload.get("parent_harness_prompt")
+        parent_prompt_sha256 = payload.get("parent_harness_prompt_sha256")
+        if parent_prompt_sha256 is not None:
+            if not isinstance(parent_prompt, str) or not parent_prompt:
+                raise ContractViolation("baseline parent harness prompt is missing")
+            if _sha256_text(parent_prompt) != parent_prompt_sha256:
+                raise ContractViolation("baseline parent harness prompt hash mismatch")
+            if "BASELINE-HARNESS:" not in joined_prompt or not any(
+                parent_prompt in prompt for prompt in prompt_texts
+            ):
+                raise ContractViolation(
+                    "baseline prompt did not consume parent harness projection"
+                )
         return content_sha256(prompt_texts), None
 
     if not isinstance(candidate_prompt, str) or not candidate_prompt:
@@ -248,6 +280,8 @@ def _validate_prompt_lineage(
         candidate_prompt in prompt for prompt in prompt_texts
     ):
         raise ContractViolation("taught prompt did not consume candidate projection")
+    if "BASELINE-HARNESS:" in joined_prompt:
+        raise ContractViolation("taught prompt consumed baseline harness projection")
     if not isinstance(compiled_artifacts, dict) or not compiled_artifacts:
         raise ContractViolation("taught compiled candidate artifacts are missing")
     for value in compiled_artifacts.values():
@@ -289,6 +323,39 @@ def _prediction_sha256(payload: Mapping[str, Any], *, label: str) -> str:
     ):
         raise ContractViolation(f"{label} prediction must be literal SHA-256")
     return value
+
+
+def _payload_parent_harness(
+    payload: Mapping[str, Any], *, label: str
+) -> tuple[str | None, str | None, str | None]:
+    lineage = (
+        payload.get("parent_harness_revision_id"),
+        payload.get("parent_harness_bundle_sha256"),
+        payload.get("parent_harness_prompt_sha256"),
+    )
+    if not any(value is not None for value in lineage):
+        return (None, None, None)
+    if not all(isinstance(value, str) and value for value in lineage):
+        raise ContractViolation(f"{label} parent harness lineage is incomplete")
+    for value in lineage[1:]:
+        _prediction_sha256(
+            {"prediction_sha256": value}, label=f"{label} parent harness"
+        )
+    return lineage  # type: ignore[return-value]
+
+
+def _parent_harness_lineage(
+    arm: CounterfactualArmEvidence,
+) -> tuple[str | None, str | None, str | None]:
+    return (
+        arm.parent_harness_revision_id,
+        arm.parent_harness_bundle_sha256,
+        arm.parent_harness_prompt_sha256,
+    )
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 __all__ = ["build_matched_counterfactual_pair"]

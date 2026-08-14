@@ -7,6 +7,7 @@ import re
 from typing import Sequence
 
 from evolve.contracts import (
+    Claim,
     Cohort,
     ExecutionLimits,
     ExecutionPlan,
@@ -16,15 +17,81 @@ from evolve.contracts import (
     canonical_json,
 )
 
-from .base import StrategyInterpretation, StrategyViolation
+from .base import (
+    StrategyContext,
+    StrategyDecision,
+    StrategyResult,
+    StrategyStatus,
+    StrategyViolation,
+    advisory_decision,
+    interpretation_inputs,
+)
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class LegacyImportStrategy:
     strategy_id = "legacy-import-v3"
+    status = StrategyStatus.COMPATIBILITY
+
+    def plan(self, context: StrategyContext) -> tuple[ExecutionPlan]:
+        required = {
+            "imported_revision_id",
+            "legacy_artifact_sha256",
+            "provenance_uri",
+        }
+        if set(context.inputs) != required:
+            raise StrategyViolation(
+                "legacy import inputs must be imported_revision_id, "
+                "legacy_artifact_sha256, and provenance_uri"
+            )
+        return self._plans(
+            campaign_id=context.campaign_id,
+            task=context.task,
+            imported_revision_id=str(context.inputs["imported_revision_id"]),
+            legacy_artifact_sha256=str(
+                context.inputs["legacy_artifact_sha256"]
+            ),
+            provenance_uri=str(context.inputs["provenance_uri"]),
+            model=context.model,
+            context_policy_id=context.context_policy_id,
+            tool_policy_id=context.tool_policy_id,
+            observer_policy_ids=context.observer_policy_ids,
+            limits=context.limits,
+        )
 
     def build_plans(
+        self,
+        *,
+        campaign_id: str,
+        task: TaskRevision,
+        imported_revision_id: str,
+        legacy_artifact_sha256: str,
+        provenance_uri: str,
+        model: ModelIdentity,
+        context_policy_id: str,
+        tool_policy_id: str,
+        observer_policy_ids: tuple[str, ...],
+        limits: ExecutionLimits,
+    ) -> tuple[ExecutionPlan]:
+        return self.plan(
+            StrategyContext(
+                campaign_id=campaign_id,
+                task=task,
+                model=model,
+                context_policy_id=context_policy_id,
+                tool_policy_id=tool_policy_id,
+                observer_policy_ids=observer_policy_ids,
+                limits=limits,
+                inputs={
+                    "imported_revision_id": imported_revision_id,
+                    "legacy_artifact_sha256": legacy_artifact_sha256,
+                    "provenance_uri": provenance_uri,
+                },
+            )
+        )
+
+    def _plans(
         self,
         *,
         campaign_id: str,
@@ -76,9 +143,26 @@ class LegacyImportStrategy:
         )
         return (plan,)
 
-    def interpret(self, receipts: Sequence[Receipt]) -> StrategyInterpretation:
-        return StrategyInterpretation(
+    def interpret(
+        self,
+        context: StrategyContext | Sequence[Receipt],
+        receipts: Sequence[Receipt] | None = None,
+    ) -> StrategyResult:
+        campaign_id, normalized = interpretation_inputs(context, receipts)
+        return StrategyResult(
             strategy_id=self.strategy_id,
-            receipt_ids=tuple(receipt.receipt_id for receipt in receipts),
-            observations={"replayed_receipt_count": len(receipts)},
+            campaign_id=campaign_id,
+            receipt_ids=tuple(receipt.receipt_id for receipt in normalized),
+            observations={"replayed_receipt_count": len(normalized)},
+        )
+
+    def next_action(
+        self, context: StrategyContext, claims: Sequence[Claim]
+    ) -> StrategyDecision:
+        return advisory_decision(
+            strategy_id=self.strategy_id,
+            status=self.status,
+            action="use-legacy-replay",
+            reason="legacy import remains a read-only compatibility path",
+            claims=claims,
         )

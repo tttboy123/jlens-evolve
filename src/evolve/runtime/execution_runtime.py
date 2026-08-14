@@ -210,6 +210,10 @@ class ExecutionRuntime:
                     "candidate_prompt_sha256",
                     "compiled_artifact_sha256",
                     "model_identity_sha256",
+                    "parent_harness_revision_id",
+                    "parent_harness_bundle_sha256",
+                    "parent_harness_prompt",
+                    "parent_harness_prompt_sha256",
                 ):
                     if name in model_output:
                         trace_payload[name] = model_output[name]
@@ -291,6 +295,19 @@ class ExecutionRuntime:
                 )
                 return appender.result("budget_exhausted")
 
+            execution_mode = plan.metadata.get("execution_mode", "full")
+            if execution_mode == "model-only-prescreen":
+                appender.append_control(
+                    "execution_terminal",
+                    {
+                        "status": "completed",
+                        "execution_mode": "model-only-prescreen",
+                    },
+                )
+                return appender.result("completed")
+            if execution_mode != "full":
+                raise ContractViolation("unsupported execution mode")
+
             native_receipt = existing_by_kind.get("native_evaluation")
             if native_receipt is None:
                 native_payload = dict(
@@ -317,6 +334,13 @@ class ExecutionRuntime:
                         "model_artifact_sha256": model_receipt.artifact_sha256,
                     }
                 )
+                for name in (
+                    "parent_harness_revision_id",
+                    "parent_harness_bundle_sha256",
+                    "parent_harness_prompt_sha256",
+                ):
+                    if name in model_output:
+                        native_payload[name] = model_output[name]
                 native_payload["evaluator_error"] = None
                 appender.append_fact("native_evaluation", native_payload)
 

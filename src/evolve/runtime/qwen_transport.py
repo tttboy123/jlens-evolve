@@ -135,6 +135,7 @@ class LegacyQwenCellRunner:
         taskset_path: Path,
         routes_path: Path,
         compiled_revision_root: Path,
+        baseline_compiled_revision_root: Path | None = None,
     ) -> None:
         self.legacy_root = legacy_root.resolve()
         self.model_path = model_path.resolve()
@@ -143,6 +144,15 @@ class LegacyQwenCellRunner:
         # Store only the path here. Baseline execution must not read, hash, or
         # deserialize candidate content; taught execution loads it fail-closed.
         self.compiled_revision_root = compiled_revision_root.resolve()
+        self.baseline_compiled_revision_root = (
+            baseline_compiled_revision_root.resolve()
+            if baseline_compiled_revision_root is not None
+            else None
+        )
+        if self.baseline_compiled_revision_root == self.compiled_revision_root:
+            raise ContractViolation(
+                "baseline and proposed candidate must use separate roots"
+            )
         for path in (
             self.legacy_root,
             self.model_path,
@@ -257,9 +267,10 @@ class LegacyQwenCellRunner:
         if not checkout.is_dir():
             raise ContractViolation("Qwen workspace checkout is missing")
         compiled = self._compiled_for_plan(plan)
+        parent_lineage = self._parent_harness_lineage(plan, compiled)
         candidate_prompt = (
             compiled_candidate_prompt(compiled, plan.task.task_id)
-            if compiled is not None
+            if compiled is not None and plan.arm == "taught"
             else None
         )
         identity = {
@@ -268,15 +279,36 @@ class LegacyQwenCellRunner:
             "legacy_task_id": legacy_task_id,
             "mechanism": mechanism,
             "qwen_input_sha256": self._input_sha256,
-            "candidate_consumed": compiled is not None,
+            "candidate_consumed": plan.arm == "taught",
             "candidate_bundle_sha256": (
-                compiled.bundle_sha256 if compiled is not None else None
+                compiled.bundle_sha256
+                if compiled is not None and plan.arm == "taught"
+                else None
+            ),
+            "candidate_revision_id": (
+                compiled.change_set.revision_id
+                if compiled is not None and plan.arm == "taught"
+                else None
+            ),
+            "compiled_artifact_sha256": (
+                dict(compiled.artifact_sha256)
+                if compiled is not None and plan.arm == "taught"
+                else {}
             ),
             "candidate_prompt_sha256": (
                 _sha256_bytes(candidate_prompt.encode())
                 if candidate_prompt is not None
                 else None
             ),
+            "parent_harness_revision_id": parent_lineage[
+                "parent_harness_revision_id"
+            ],
+            "parent_harness_bundle_sha256": parent_lineage[
+                "parent_harness_bundle_sha256"
+            ],
+            "parent_harness_prompt_sha256": parent_lineage[
+                "parent_harness_prompt_sha256"
+            ],
         }
         target = output_root.resolve() / plan.plan_id
         if target.exists():
@@ -345,15 +377,21 @@ class LegacyQwenCellRunner:
                 "elapsed_seconds": round(elapsed, 6),
                 "mechanism": mechanism,
                 "condition_id": condition.condition_id,
-                "candidate_consumed": compiled is not None,
+                "candidate_consumed": plan.arm == "taught",
                 "candidate_bundle_sha256": (
-                    compiled.bundle_sha256 if compiled is not None else None
+                    compiled.bundle_sha256
+                    if compiled is not None and plan.arm == "taught"
+                    else None
                 ),
                 "candidate_revision_id": (
-                    compiled.change_set.revision_id if compiled is not None else None
+                    compiled.change_set.revision_id
+                    if compiled is not None and plan.arm == "taught"
+                    else None
                 ),
                 "compiled_artifact_sha256": (
-                    dict(compiled.artifact_sha256) if compiled is not None else {}
+                    dict(compiled.artifact_sha256)
+                    if compiled is not None and plan.arm == "taught"
+                    else {}
                 ),
                 "candidate_prompt": candidate_prompt,
                 "candidate_prompt_sha256": (
@@ -361,6 +399,7 @@ class LegacyQwenCellRunner:
                     if candidate_prompt is not None
                     else None
                 ),
+                **parent_lineage,
                 "model_identity_sha256": self._model_identity(),
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -386,7 +425,12 @@ class LegacyQwenCellRunner:
 
     def _compiled_for_plan(self, plan: ExecutionPlan) -> CompiledRevision | None:
         if plan.arm == "baseline":
-            return None
+            if self.baseline_compiled_revision_root is None:
+                return None
+            compiled = CompiledRevision.load(self.baseline_compiled_revision_root)
+            if plan.candidate_revision_id != compiled.change_set.revision_id:
+                raise ContractViolation("baseline plan parent harness revision mismatch")
+            return compiled
         if plan.arm != "taught":
             raise ContractViolation("local Qwen runner requires paired arms")
         compiled = CompiledRevision.load(self.compiled_revision_root)
@@ -397,7 +441,34 @@ class LegacyQwenCellRunner:
             raise ContractViolation("compiled Router has no route for taught task")
         if route != compiled.operator.operator_id:
             raise ContractViolation("compiled Router selected another Operator")
+        if self.baseline_compiled_revision_root is not None:
+            parent = CompiledRevision.load(self.baseline_compiled_revision_root)
+            if compiled.change_set.parent_revision_id != parent.change_set.revision_id:
+                raise ContractViolation("proposed candidate parent harness mismatch")
         return compiled
+
+    def _parent_harness_lineage(
+        self,
+        plan: ExecutionPlan,
+        compiled: CompiledRevision | None,
+    ) -> dict[str, str | None]:
+        parent = compiled if plan.arm == "baseline" else None
+        if plan.arm == "taught" and self.baseline_compiled_revision_root is not None:
+            parent = CompiledRevision.load(self.baseline_compiled_revision_root)
+        if parent is None:
+            return {
+                "parent_harness_revision_id": None,
+                "parent_harness_bundle_sha256": None,
+                "parent_harness_prompt": None,
+                "parent_harness_prompt_sha256": None,
+            }
+        prompt = compiled_candidate_prompt(parent, plan.task.task_id)
+        return {
+            "parent_harness_revision_id": parent.change_set.revision_id,
+            "parent_harness_bundle_sha256": parent.bundle_sha256,
+            "parent_harness_prompt": prompt,
+            "parent_harness_prompt_sha256": _sha256_bytes(prompt.encode("utf-8")),
+        }
 
     @staticmethod
     def _condition_for_plan(
@@ -411,8 +482,15 @@ class LegacyQwenCellRunner:
         if plan.arm == "baseline":
             # The builder requires a taught value even when selecting the
             # baseline row. This fixed sentinel is not candidate-derived.
-            teaching = "BASELINE-SENTINEL-NOT-CANDIDATE-DERIVED"
-            parent_revision_id = "baseline-no-candidate"
+            if compiled is None:
+                teaching = "BASELINE-SENTINEL-NOT-CANDIDATE-DERIVED"
+                parent_revision_id = "baseline-no-candidate"
+            else:
+                teaching = (
+                    "BASELINE-HARNESS:\n"
+                    + compiled_candidate_prompt(compiled, plan.task.task_id)
+                )
+                parent_revision_id = compiled.change_set.revision_id
         else:
             if compiled is None:
                 raise ContractViolation("taught execution requires compiled candidate")
@@ -459,6 +537,29 @@ class LegacyQwenCellRunner:
             raise ContractViolation("frozen Qwen cell is unreadable") from exc
         if frozen.get("request") != dict(expected_identity):
             raise ContractViolation("frozen Qwen cell request identity drifted")
+        for name in (
+            "candidate_consumed",
+            "candidate_bundle_sha256",
+            "candidate_revision_id",
+            "compiled_artifact_sha256",
+            "candidate_prompt_sha256",
+            "parent_harness_revision_id",
+            "parent_harness_bundle_sha256",
+            "parent_harness_prompt_sha256",
+        ):
+            if frozen.get(name) != expected_identity.get(name):
+                raise ContractViolation("frozen Qwen cell harness lineage drifted")
+        parent_prompt = frozen.get("parent_harness_prompt")
+        parent_prompt_sha256 = frozen.get("parent_harness_prompt_sha256")
+        if parent_prompt_sha256 is None:
+            if parent_prompt is not None:
+                raise ContractViolation("frozen Qwen parent harness prompt drifted")
+        elif (
+            not isinstance(parent_prompt, str)
+            or _sha256_bytes(parent_prompt.encode("utf-8"))
+            != parent_prompt_sha256
+        ):
+            raise ContractViolation("frozen Qwen parent harness prompt was tampered")
         raw = target / str(frozen["raw_output_file"])
         patch = str(frozen["patch"])
         if (
@@ -492,6 +593,16 @@ class LegacyQwenCellRunner:
             "compiled_artifact_sha256": frozen.get("compiled_artifact_sha256", {}),
             "candidate_prompt": frozen.get("candidate_prompt"),
             "candidate_prompt_sha256": frozen.get("candidate_prompt_sha256"),
+            "parent_harness_revision_id": frozen.get(
+                "parent_harness_revision_id"
+            ),
+            "parent_harness_bundle_sha256": frozen.get(
+                "parent_harness_bundle_sha256"
+            ),
+            "parent_harness_prompt": frozen.get("parent_harness_prompt"),
+            "parent_harness_prompt_sha256": frozen.get(
+                "parent_harness_prompt_sha256"
+            ),
             "model_identity_sha256": frozen["model_identity_sha256"],
             "input_tokens": int(frozen["input_tokens"]),
             "output_tokens": int(frozen["output_tokens"]),

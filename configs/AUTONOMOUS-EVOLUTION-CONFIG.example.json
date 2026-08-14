@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "goal": {
+    "goal_id": "feedback-skill-evolution",
+    "description": "Improve declaration localization without changing model weights.",
+    "target_native_gains": 3,
+    "max_rounds": 20,
+    "no_progress_patience": 5
+  },
+  "model": {
+    "provider": "local-mlx",
+    "model_path": "/absolute/path/to/Qwen3.5-4B-mlx-4bit",
+    "model_identity_files": [
+      "config.json",
+      "model.safetensors.index.json",
+      "tokenizer_config.json"
+    ]
+  },
+  "swe_bench": {
+    "task_pool": "/absolute/path/to/feedback-task-pool.json",
+    "source_pool": "/absolute/path/to/clean-feedback-checkouts",
+    "official_harness": "/absolute/path/to/pinned-swebench",
+    "official_evaluator": "/absolute/path/to/official_patch_evaluator.py",
+    "cohort": "feedback"
+  },
+  "teacher": {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "endpoint": "https://api.deepseek.com/chat/completions",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "budget_cny": 10.0,
+    "max_output_tokens": 2048
+  },
+  "execution": {
+    "tasks_per_campaign": 3,
+    "qwen_prescreen_count": 1,
+    "native_finalist_count": 1,
+    "seed": 0
+  }
+}

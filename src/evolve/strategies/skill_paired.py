@@ -6,6 +6,7 @@ import hashlib
 from typing import Any, Mapping, Sequence
 
 from evolve.contracts import (
+    Claim,
     Cohort,
     ExecutionLimits,
     ExecutionPlan,
@@ -15,11 +16,57 @@ from evolve.contracts import (
     canonical_json,
 )
 
-from .base import StrategyInterpretation, StrategyViolation
+from .base import (
+    StrategyContext,
+    StrategyDecision,
+    StrategyPhase,
+    StrategyResult,
+    StrategyStatus,
+    StrategyViolation,
+    advisory_decision,
+    interpretation_inputs,
+)
 
 
 class SkillPairedStrategy:
     strategy_id = "skill-paired-v3"
+    status = StrategyStatus.LIVE
+
+    def plan(self, context: StrategyContext) -> tuple[ExecutionPlan, ...]:
+        required = {"baseline_revision_id"}
+        if context.phase is StrategyPhase.EXPERIMENT:
+            required.add("taught_revision_id")
+        optional = {"generation_config", "plan_metadata"}
+        unknown = set(context.inputs) - required - optional
+        missing = required - set(context.inputs)
+        if missing or unknown:
+            raise StrategyViolation(
+                f"skill paired inputs invalid; missing={sorted(missing)}, "
+                f"unknown={sorted(unknown)}"
+            )
+        generation = context.inputs.get("generation_config")
+        metadata = context.inputs.get("plan_metadata")
+        if generation is not None and not isinstance(generation, Mapping):
+            raise StrategyViolation("generation_config must be a mapping")
+        if metadata is not None and not isinstance(metadata, Mapping):
+            raise StrategyViolation("plan_metadata must be a mapping")
+        return self._plans(
+            campaign_id=context.campaign_id,
+            task=context.task,
+            baseline_revision_id=str(context.inputs["baseline_revision_id"]),
+            taught_revision_id=(
+                str(context.inputs["taught_revision_id"])
+                if context.phase is StrategyPhase.EXPERIMENT
+                else None
+            ),
+            model=context.model,
+            context_policy_id=context.context_policy_id,
+            tool_policy_id=context.tool_policy_id,
+            observer_policy_ids=context.observer_policy_ids,
+            limits=context.limits,
+            generation_config=generation,
+            plan_metadata=metadata,
+        )
 
     def build_plans(
         self,
@@ -36,6 +83,42 @@ class SkillPairedStrategy:
         generation_config: Mapping[str, Any] | None = None,
         plan_metadata: Mapping[str, Any] | None = None,
     ) -> tuple[ExecutionPlan, ExecutionPlan]:
+        plans = self.plan(
+            StrategyContext(
+                campaign_id=campaign_id,
+                task=task,
+                model=model,
+                context_policy_id=context_policy_id,
+                tool_policy_id=tool_policy_id,
+                observer_policy_ids=observer_policy_ids,
+                limits=limits,
+                inputs={
+                    "baseline_revision_id": baseline_revision_id,
+                    "taught_revision_id": taught_revision_id,
+                    "generation_config": generation_config or {},
+                    "plan_metadata": plan_metadata or {},
+                },
+            )
+        )
+        if len(plans) != 2:
+            raise StrategyViolation("paired planning did not produce two arms")
+        return plans[0], plans[1]
+
+    def _plans(
+        self,
+        *,
+        campaign_id: str,
+        task: TaskRevision,
+        baseline_revision_id: str,
+        taught_revision_id: str | None,
+        model: ModelIdentity,
+        context_policy_id: str,
+        tool_policy_id: str,
+        observer_policy_ids: tuple[str, ...],
+        limits: ExecutionLimits,
+        generation_config: Mapping[str, Any] | None = None,
+        plan_metadata: Mapping[str, Any] | None = None,
+    ) -> tuple[ExecutionPlan, ...]:
         if task.cohort is not Cohort.FEEDBACK:
             raise StrategyViolation(
                 "Skill paired plans are restricted to feedback tasks"
@@ -66,10 +149,10 @@ class SkillPairedStrategy:
                 metadata=metadata,
             )
 
-        plans = (
-            build("baseline", baseline_revision_id),
-            build("taught", taught_revision_id),
-        )
+        baseline = build("baseline", baseline_revision_id)
+        if taught_revision_id is None:
+            return (baseline,)
+        plans = (baseline, build("taught", taught_revision_id))
         self.validate_matched_pair(*plans)
         return plans
 
@@ -106,9 +189,26 @@ class SkillPairedStrategy:
         if baseline.task.cohort is not Cohort.FEEDBACK:
             raise StrategyViolation("matched pair must use a feedback task")
 
-    def interpret(self, receipts: Sequence[Receipt]) -> StrategyInterpretation:
-        return StrategyInterpretation(
+    def interpret(
+        self,
+        context: StrategyContext | Sequence[Receipt],
+        receipts: Sequence[Receipt] | None = None,
+    ) -> StrategyResult:
+        campaign_id, normalized = interpretation_inputs(context, receipts)
+        return StrategyResult(
             strategy_id=self.strategy_id,
-            receipt_ids=tuple(receipt.receipt_id for receipt in receipts),
-            observations={"arm_receipt_count": len(receipts)},
+            campaign_id=campaign_id,
+            receipt_ids=tuple(receipt.receipt_id for receipt in normalized),
+            observations={"arm_receipt_count": len(normalized)},
+        )
+
+    def next_action(
+        self, context: StrategyContext, claims: Sequence[Claim]
+    ) -> StrategyDecision:
+        return advisory_decision(
+            strategy_id=self.strategy_id,
+            status=self.status,
+            action="await-authoritative-claims",
+            reason="promotion remains owned by the Claim and Governance authorities",
+            claims=claims,
         )

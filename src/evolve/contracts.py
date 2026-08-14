@@ -396,6 +396,9 @@ class CounterfactualArmEvidence:
     candidate_consumed: bool
     candidate_revision_id: str | None
     candidate_bundle_sha256: str | None
+    parent_harness_revision_id: str | None = None
+    parent_harness_bundle_sha256: str | None = None
+    parent_harness_prompt_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.arm not in {"baseline", "taught"}:
@@ -439,6 +442,26 @@ class CounterfactualArmEvidence:
             _require_sha256(
                 "candidate_prompt_sha256", self.candidate_prompt_sha256 or ""
             )
+        parent_lineage = (
+            self.parent_harness_revision_id,
+            self.parent_harness_bundle_sha256,
+            self.parent_harness_prompt_sha256,
+        )
+        if any(value is not None for value in parent_lineage):
+            if not all(value is not None for value in parent_lineage):
+                raise ContractViolation("parent harness lineage is incomplete")
+            _require_text(
+                "parent_harness_revision_id",
+                self.parent_harness_revision_id or "",
+            )
+            _require_sha256(
+                "parent_harness_bundle_sha256",
+                self.parent_harness_bundle_sha256 or "",
+            )
+            _require_sha256(
+                "parent_harness_prompt_sha256",
+                self.parent_harness_prompt_sha256 or "",
+            )
 
     @property
     def content_sha256(self) -> str:
@@ -460,6 +483,9 @@ class MatchedCounterfactualPair:
     execution_config_sha256: str
     baseline: CounterfactualArmEvidence
     taught: CounterfactualArmEvidence
+    parent_harness_revision_id: str | None = None
+    parent_harness_bundle_sha256: str | None = None
+    parent_harness_prompt_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -487,6 +513,33 @@ class MatchedCounterfactualPair:
             raise ContractViolation("taught candidate revision does not match pair")
         if self.taught.candidate_bundle_sha256 != self.candidate_bundle_sha256:
             raise ContractViolation("taught candidate bundle does not match pair")
+        parent_lineage = (
+            self.parent_harness_revision_id,
+            self.parent_harness_bundle_sha256,
+            self.parent_harness_prompt_sha256,
+        )
+        if any(value is not None for value in parent_lineage):
+            if not all(value is not None for value in parent_lineage):
+                raise ContractViolation("pair parent harness lineage is incomplete")
+            _require_text(
+                "parent_harness_revision_id",
+                self.parent_harness_revision_id or "",
+            )
+            _require_sha256(
+                "parent_harness_bundle_sha256",
+                self.parent_harness_bundle_sha256 or "",
+            )
+            _require_sha256(
+                "parent_harness_prompt_sha256",
+                self.parent_harness_prompt_sha256 or "",
+            )
+        for arm in (self.baseline, self.taught):
+            if (
+                arm.parent_harness_revision_id,
+                arm.parent_harness_bundle_sha256,
+                arm.parent_harness_prompt_sha256,
+            ) != parent_lineage:
+                raise ContractViolation("counterfactual parent harness lineage mismatch")
         if self.baseline.plan_id == self.taught.plan_id:
             raise ContractViolation("counterfactual arms must be separate executions")
         if len(set(self.evidence_ids)) != 4 or len(set(self.receipt_ids)) != 6:

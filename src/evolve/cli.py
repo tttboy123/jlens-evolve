@@ -47,6 +47,16 @@ def _resolved(path: Path, instance_id: str) -> bool:
     return row["resolved"]
 
 
+def _json_config(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"campaign config is unreadable: {path}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("campaign config must be a JSON object")
+    return payload
+
+
 def run_legacy_feedback_e2e(
     *,
     root: Path,
@@ -215,10 +225,27 @@ def main(argv: list[str] | None = None) -> int:
     verify = sub.add_parser("verify-manifest")
     verify.add_argument("--manifest", type=Path, required=True)
     verify.add_argument("--root", type=Path, required=True)
-    continuous = sub.add_parser("continuous-feedback-evolution")
-    continuous.add_argument("--config", type=Path, required=True)
-    continuous.add_argument("--output", type=Path, required=True)
-    continuous.add_argument("--worktree-root", type=Path, required=True)
+    autonomous = sub.add_parser(
+        "autonomous-evolve",
+        help="evolve a frozen Model Skill/Harness over feedback SWE-bench tasks",
+    )
+    autonomous.add_argument("--config", type=Path, required=True)
+    autonomous.add_argument("--output", type=Path, required=True)
+    autonomous.add_argument("--worktree-root", type=Path, default=Path.cwd())
+    campaign = sub.add_parser(
+        "campaign", help="run a strategy through its truthful v3 product path"
+    )
+    campaign_action = campaign.add_subparsers(dest="campaign_action", required=True)
+    campaign_import = campaign_action.add_parser("import")
+    campaign_import.add_argument("--strategy", choices=("legacy",), required=True)
+    campaign_import.add_argument("--config", type=Path, required=True)
+    campaign_import.add_argument("--output", type=Path, required=True)
+    campaign_run = campaign_action.add_parser("run")
+    campaign_run.add_argument(
+        "--strategy", choices=("skill-paired", "agent-program"), required=True
+    )
+    campaign_run.add_argument("--config", type=Path, required=True)
+    campaign_run.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == "legacy-feedback-e2e":
         report = run_legacy_feedback_e2e(
@@ -240,15 +267,51 @@ def main(argv: list[str] | None = None) -> int:
         count = seal_run(args.root.resolve())
         print(f"sealed and verified {count} manifest entries")
         return 0
-    if args.command == "continuous-feedback-evolution":
-        from evolve.continuous_batch import run_continuous_feedback_evolution
+    if args.command == "autonomous-evolve":
+        from evolve.autonomous_evolution import run_autonomous_evolution
 
-        report = run_continuous_feedback_evolution(
+        report = run_autonomous_evolution(
             config_path=args.config.resolve(),
             output_root=args.output.resolve(),
             worktree_root=args.worktree_root.resolve(),
         )
         print(canonical_json(report))
+        return 0
+    if args.command == "campaign":
+        if args.campaign_action == "run" and args.strategy == "skill-paired":
+            result = run_fresh_feedback_e2e(
+                config_path=args.config.resolve(), output_root=args.output.resolve()
+            )
+            print(canonical_json(result))
+            return 0
+        if args.campaign_action == "run" and args.strategy == "agent-program":
+            print(
+                canonical_json(
+                    {
+                        "strategy": "agent-program",
+                        "status": "not-yet-live",
+                        "reason": "AgentProgram tournament has no live authority adapter",
+                    }
+                )
+            )
+            return 2
+        legacy = _json_config(args.config.resolve())
+        required = {
+            "root",
+            "legacy_root",
+            "teacher_receipt",
+            "qwen_receipt",
+        }
+        if set(legacy) != required:
+            raise ValueError("legacy import campaign config fields are invalid")
+        report = run_legacy_feedback_e2e(
+            root=Path(str(legacy["root"])).expanduser().resolve(),
+            legacy_root=Path(str(legacy["legacy_root"])).expanduser().resolve(),
+            output=args.output.resolve(),
+            teacher_receipt=Path(str(legacy["teacher_receipt"])).expanduser().resolve(),
+            qwen_receipt=Path(str(legacy["qwen_receipt"])).expanduser().resolve(),
+        )
+        print(canonical_json({**report, "strategy_status": "compatibility"}))
         return 0
     count = AuditVerifier().verify_manifest(args.manifest.resolve(), root=args.root)
     print(f"verified {count} manifest entries")

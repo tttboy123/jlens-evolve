@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from evolve.alignment import align_native_pair
+from evolve.campaigns import CampaignRunner, CampaignSpec
 from evolve.contracts import (
     Authorization,
     Claim,
@@ -46,7 +47,6 @@ from evolve.kernel import (
     CampaignSnapshot,
     CampaignStatus,
     DurableCostLedger,
-    WorkItemSnapshot,
 )
 from evolve.observers import ObserverHub, TrustedJLensReceiptIssuer
 from evolve.registry import (
@@ -65,7 +65,7 @@ from evolve.runtime import (
     NativeEvaluator,
     WorkspaceManager,
 )
-from evolve.strategies import SkillPairedStrategy
+from evolve.strategies import SkillPairedStrategy, StrategyContext, StrategyPhase
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,22 +149,28 @@ def run_skill_paired_campaign(
         authorization=authorization,
         native_evaluator=native_evaluator,
     )
-    plan_pairs = tuple(
-        strategy.build_plans(
+    contexts = tuple(
+        StrategyContext(
             campaign_id=spec.campaign_id,
             task=task,
-            baseline_revision_id=spec.baseline_revision_id,
-            taught_revision_id=spec.candidate_revision_id,
             model=spec.model,
             context_policy_id=spec.context_policy_id,
             tool_policy_id=spec.tool_policy_id,
             observer_policy_ids=spec.observer_policy_ids,
             limits=spec.limits,
-            generation_config=spec.generation_config,
-            plan_metadata=dict(spec.task_execution_metadata.get(task.revision_id, {})),
+            phase=StrategyPhase.EXPERIMENT,
+            inputs={
+                "baseline_revision_id": spec.baseline_revision_id,
+                "taught_revision_id": spec.candidate_revision_id,
+                "generation_config": dict(spec.generation_config),
+                "plan_metadata": dict(
+                    spec.task_execution_metadata.get(task.revision_id, {})
+                ),
+            },
         )
         for task in task_rows
     )
+    plan_pairs = tuple(tuple(strategy.plan(context)) for context in contexts)
     for baseline, taught in plan_pairs:
         strategy.validate_matched_pair(baseline, taught)
     plans = tuple(plan for pair in plan_pairs for plan in pair)
@@ -182,18 +188,6 @@ def run_skill_paired_campaign(
         )
     if terminal_replay:
         _validate_terminal_replay(starting_snapshot, plans, receipt_store)
-    else:
-        if starting_snapshot.status in {
-            CampaignStatus.CREATED,
-            CampaignStatus.PAUSED,
-        }:
-            controller.start()
-        for plan in plans:
-            controller.submit(
-                plan,
-                reserved_model_calls=1,
-                remote=model_transport.remote,
-            )
 
     runtime = ExecutionRuntime(
         model_transport=model_transport,
@@ -203,29 +197,25 @@ def run_skill_paired_campaign(
         receipt_sink=receipt_store,
         clock=clock,
     )
-    executions: list[ExecutionResult] = []
-    for plan in plans:
-        execution = runtime.execute(
-            plan,
-            authorization,
+    campaign_run = CampaignRunner(runtime=runtime, controller=controller).run(
+        CampaignSpec(
+            campaign_id=spec.campaign_id,
+            contexts=contexts,
+            authorization=authorization,
             mechanism_prediction=spec.mechanism_prediction,
-        )
-        executions.append(execution)
-        _validate_candidate_isolation(
-            plans=(plan,),
-            executions=(execution,),
-            candidate_revision_id=spec.candidate_revision_id,
-            candidate_bundle_sha256=spec.candidate_artifact_sha256,
-        )
-        if not terminal_replay:
-            item = _work_item(controller.snapshot(), plan.plan_id)
-            if item.status == "pending":
-                controller.record_result(
-                    plan.plan_id,
-                    actual_cost_cny=_execution_cost(execution),
-                    actual_model_calls=_execution_model_calls(execution),
-                    succeeded=execution.status == "completed",
-                )
+        ),
+        strategy,
+    )
+    plans = campaign_run.plans
+    executions = list(campaign_run.executions)
+    if len(executions) != len(plans):
+        raise ContractViolation("Skill campaign did not execute every paired plan")
+    _validate_candidate_isolation(
+        plans=plans,
+        executions=tuple(executions),
+        candidate_revision_id=spec.candidate_revision_id,
+        candidate_bundle_sha256=spec.candidate_artifact_sha256,
+    )
 
     if trusted_observation_issuer is not None:
         if spec.mechanism_prediction is None:
@@ -264,16 +254,6 @@ def run_skill_paired_campaign(
                 raise ContractViolation(
                     "trusted observation issuer requires trusted-jlens-v1 observer"
                 )
-
-    if not terminal_replay:
-        statuses = {execution.status for execution in executions}
-        if statuses == {"completed"}:
-            controller.finalize(CampaignStatus.COMPLETED)
-        else:
-            controller.mark_partial(
-                "one or more Runtime executions did not complete: "
-                + ", ".join(sorted(statuses))
-            )
 
     claim_rows: list[Claim] = []
     for baseline, taught in plan_pairs:
@@ -562,33 +542,6 @@ def _validate_terminal_replay(
             for receipt in receipt_store.receipts_for(plan_id)
         ):
             raise ContractViolation("terminal checkpoint is missing Runtime receipts")
-
-
-def _work_item(snapshot: CampaignSnapshot, plan_id: str) -> WorkItemSnapshot:
-    try:
-        return next(item for item in snapshot.work_items if item.plan_id == plan_id)
-    except StopIteration as error:
-        raise ContractViolation(
-            f"campaign checkpoint is missing plan {plan_id}"
-        ) from error
-
-
-def _execution_cost(execution: ExecutionResult) -> float:
-    cost_receipts = tuple(
-        receipt for receipt in execution.receipts if receipt.kind == "cost"
-    )
-    if len(cost_receipts) > 1:
-        raise ContractViolation("Runtime produced duplicate cost receipts")
-    return float(cost_receipts[0].payload["cost_cny"]) if cost_receipts else 0.0
-
-
-def _execution_model_calls(execution: ExecutionResult) -> int:
-    model_receipts = tuple(
-        receipt for receipt in execution.receipts if receipt.kind == "model"
-    )
-    if len(model_receipts) > 1:
-        raise ContractViolation("Runtime produced duplicate model receipts")
-    return len(model_receipts)
 
 
 def _native_evidence(

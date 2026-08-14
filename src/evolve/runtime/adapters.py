@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Protocol
 
-from evolve.contracts import Authorization, EvidenceEnvelope, ExecutionPlan, Receipt
+from evolve.contracts import (
+    Authorization,
+    EvidenceEnvelope,
+    ExecutionPlan,
+    MechanismPrediction,
+    Receipt,
+)
 
 
 class ModelTransport(Protocol):
@@ -45,4 +51,10 @@ class ReceiptSink(Protocol):
 class RuntimeEntry(Protocol):
     """Strategy-facing seam: plans enter here, never through adapters directly."""
 
-    def execute(self, plan: ExecutionPlan, authorization: Authorization) -> object: ...
+    def execute(
+        self,
+        plan: ExecutionPlan,
+        authorization: Authorization,
+        *,
+        mechanism_prediction: MechanismPrediction | None = None,
+    ) -> object: ...

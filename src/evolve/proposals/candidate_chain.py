@@ -40,30 +40,34 @@ def _require_identifier(name: str, value: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class CompileSpec:
-    """Human-authored, immutable bridge from a v1 candidate to executable form."""
+    """Immutable revision identity plus the legacy v1 executable bridge."""
 
     candidate_id: str
     revision_id: str
     parent_revision_id: str
     cohort: Cohort
-    operator_id: str
-    operator_instruction: str
-    routes: tuple[tuple[str, str], ...]
+    operator_id: str = ""
+    operator_instruction: str = ""
+    routes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
             "candidate_id",
             "revision_id",
             "parent_revision_id",
-            "operator_id",
         ):
             value = _require_text(name, getattr(self, name))
             _require_identifier(name, value)
-        _require_text("operator_instruction", self.operator_instruction)
         if self.cohort is not Cohort.FEEDBACK:
             raise ContractViolation("candidate compilation is feedback-only")
+        if not self.operator_id and not self.operator_instruction and not self.routes:
+            return
+        _require_identifier(
+            "operator_id", _require_text("operator_id", self.operator_id)
+        )
+        _require_text("operator_instruction", self.operator_instruction)
         if not self.routes:
-            raise ContractViolation("candidate router must contain feedback routes")
+            raise ContractViolation("legacy candidate router must contain routes")
         task_ids: set[str] = set()
         for task_id, operator_id in self.routes:
             _require_identifier("route task_id", task_id)
@@ -93,6 +97,16 @@ class CandidateChangeSet:
     operator_instruction: str
     routes: tuple[tuple[str, str], ...]
     active: bool = False
+    operator_kind: str = "zero-arg"
+    operator_arguments: tuple[str, ...] = ()
+    memory_policy: dict[str, Any] | None = None
+    preconditions: tuple[object, ...] = ()
+    expected_external_effect: object | None = None
+    expected_internal_effect: object | None = None
+    falsification: object | None = None
+    source_request_sha256: str = ""
+    source_response_sha256: str = ""
+    lineage_sha256: str = ""
 
     def __post_init__(self) -> None:
         for name in (
@@ -111,8 +125,15 @@ class CandidateChangeSet:
             "operator_instruction",
         ):
             _require_text(name, getattr(self, name))
-        for name in ("source_candidate_sha256", "compile_spec_sha256"):
-            if _SHA256.fullmatch(getattr(self, name)) is None:
+        for name in (
+            "source_candidate_sha256",
+            "compile_spec_sha256",
+            "source_request_sha256",
+            "source_response_sha256",
+            "lineage_sha256",
+        ):
+            value = getattr(self, name)
+            if value and _SHA256.fullmatch(value) is None:
                 raise ContractViolation(f"{name} must be a literal SHA-256")
         if self.active:
             raise ContractViolation("compiled candidate must remain inactive")
@@ -134,6 +155,11 @@ class CompiledSkill:
     protocol: str
     prompt_template: str
     skill_text: str
+    preconditions: tuple[object, ...] = ()
+    expected_external_effect: object | None = None
+    expected_internal_effect: object | None = None
+    falsification: object | None = None
+    lineage_sha256: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +170,8 @@ class CompiledOperator:
     kind: str
     arguments: tuple[str, ...]
     instruction: str
+    parent_revision_id: str = ""
+    lineage_sha256: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +179,17 @@ class CompiledRouter:
     candidate_id: str
     revision_id: str
     routes: tuple[tuple[str, str], ...]
+    parent_revision_id: str = ""
+    lineage_sha256: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledMemoryPolicy:
+    candidate_id: str
+    revision_id: str
+    parent_revision_id: str
+    policy: dict[str, Any]
+    lineage_sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +205,8 @@ class CompiledRevision:
     artifact_sha256: tuple[tuple[str, str], ...]
     manifest_path: Path
     bundle_sha256: str
+    memory_policy: CompiledMemoryPolicy | None = None
+    lineage_sha256: str = ""
 
     @classmethod
     def load(cls, root: str | Path) -> CompiledRevision:
@@ -178,8 +219,12 @@ class CompiledRevision:
             raise ContractViolation(
                 "compiled revision manifest is unreadable"
             ) from error
-        if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("schema_version") not in {1, 2}
+        ):
             raise ContractViolation("compiled revision manifest is invalid")
+        manifest_schema = manifest["schema_version"]
         artifacts = manifest.get("artifacts")
         if not isinstance(artifacts, list) or not artifacts:
             raise ContractViolation("compiled revision artifacts are missing")
@@ -217,6 +262,8 @@ class CompiledRevision:
             "COMPILED-OPERATOR.json",
             "COMPILED-ROUTER.json",
         }
+        if manifest.get("memory_policy_present") is True:
+            expected_names.add("COMPILED-MEMORY-POLICY.json")
         if (
             len(artifact_hashes) != len(expected_names)
             or {name for name, _ in artifact_hashes} != expected_names
@@ -240,7 +287,7 @@ class CompiledRevision:
             raise ContractViolation(
                 "compiled Teacher lineage is invalid JSON"
             ) from error
-        teacher = _parse_v1_exchange(request, response, request_bytes)
+        teacher = _parse_teacher_exchange(request, response, request_bytes)
         if (
             manifest.get("provider") != teacher["provider"]
             or manifest.get("model") != teacher["model"]
@@ -279,9 +326,11 @@ class CompiledRevision:
             revision_id=compile_spec_payload["revision_id"],
             parent_revision_id=compile_spec_payload["parent_revision_id"],
             cohort=Cohort(compile_spec_payload["cohort"]),
-            operator_id=compile_spec_payload["operator_id"],
-            operator_instruction=compile_spec_payload["operator_instruction"],
-            routes=_routes(compile_spec_payload["routes"]),
+            operator_id=compile_spec_payload.get("operator_id", ""),
+            operator_instruction=compile_spec_payload.get(
+                "operator_instruction", ""
+            ),
+            routes=_routes(compile_spec_payload.get("routes", ())),
         )
         if manifest.get("compile_spec_sha256") != compile_spec.content_sha256:
             raise ContractViolation("compiled CompileSpec identity mismatch")
@@ -293,15 +342,33 @@ class CompiledRevision:
             **{
                 **change_set_payload,
                 "routes": _routes(change_set_payload["routes"]),
+                "operator_arguments": tuple(
+                    change_set_payload.get("operator_arguments", ())
+                ),
+                "preconditions": tuple(change_set_payload.get("preconditions", ())),
             }
         )
+        _validate_change_set_source(change_set, teacher, compile_spec)
         if manifest.get("revision_sha256") != change_set.content_sha256:
             raise ContractViolation("compiled candidate revision identity mismatch")
+        if (
+            manifest.get("candidate_id") != change_set.candidate_id
+            or manifest.get("revision_id") != change_set.revision_id
+            or manifest.get("parent_revision_id") != change_set.parent_revision_id
+            or compile_spec.candidate_id != change_set.candidate_id
+            or compile_spec.revision_id != change_set.revision_id
+            or compile_spec.parent_revision_id != change_set.parent_revision_id
+        ):
+            raise ContractViolation("compiled revision lineage identity mismatch")
+        skill_payload = _without_metadata(
+            _artifact_json(bundle_root, artifact_hashes, "COMPILED-SKILL.json"),
+            "skill",
+        )
         skill = CompiledSkill(
-            **_without_metadata(
-                _artifact_json(bundle_root, artifact_hashes, "COMPILED-SKILL.json"),
-                "skill",
-            )
+            **{
+                **skill_payload,
+                "preconditions": tuple(skill_payload.get("preconditions", ())),
+            }
         )
         operator_payload = _without_metadata(
             _artifact_json(bundle_root, artifact_hashes, "COMPILED-OPERATOR.json"),
@@ -317,7 +384,55 @@ class CompiledRevision:
         router = CompiledRouter(
             **{**router_payload, "routes": _routes(router_payload["routes"])}
         )
-        _validate_compiled_projection(change_set, skill, operator, router)
+        memory_policy: CompiledMemoryPolicy | None = None
+        if "COMPILED-MEMORY-POLICY.json" in expected_names:
+            memory_payload = _without_metadata(
+                _artifact_json(
+                    bundle_root,
+                    artifact_hashes,
+                    "COMPILED-MEMORY-POLICY.json",
+                ),
+                "memory_policy",
+            )
+            memory_policy = CompiledMemoryPolicy(**memory_payload)
+        _validate_compiled_projection(
+            change_set, skill, operator, router, memory_policy=memory_policy
+        )
+        lineage_sha256 = ""
+        if manifest_schema == 2:
+            lineage = {
+                "parent_revision_id": compile_spec.parent_revision_id,
+                "source_candidate_sha256": content_sha256(teacher["candidate"]),
+                "compile_spec_sha256": compile_spec.content_sha256,
+                "request_sha256": _sha256(request_bytes),
+                "response_sha256": _sha256(response_bytes),
+            }
+            lineage_sha256 = content_sha256(lineage)
+            if (
+                manifest.get("lineage") != lineage
+                or manifest.get("lineage_sha256") != lineage_sha256
+            ):
+                raise ContractViolation("compiled candidate lineage hash mismatch")
+            if (
+                change_set.source_candidate_sha256
+                != lineage["source_candidate_sha256"]
+                or change_set.compile_spec_sha256
+                != lineage["compile_spec_sha256"]
+                or change_set.parent_revision_id != lineage["parent_revision_id"]
+                or manifest.get("parent_revision_id")
+                != lineage["parent_revision_id"]
+                or change_set.source_request_sha256 != lineage["request_sha256"]
+                or change_set.source_response_sha256 != lineage["response_sha256"]
+                or change_set.lineage_sha256 != lineage_sha256
+                or skill.lineage_sha256 != lineage_sha256
+                or operator.lineage_sha256 != lineage_sha256
+                or router.lineage_sha256 != lineage_sha256
+                or (
+                    memory_policy is not None
+                    and memory_policy.lineage_sha256 != lineage_sha256
+                )
+            ):
+                raise ContractViolation("compiled artifact lineage is incomplete")
         return cls(
             root=bundle_root,
             change_set=change_set,
@@ -330,11 +445,13 @@ class CompiledRevision:
             artifact_sha256=tuple(artifact_hashes),
             manifest_path=manifest_path,
             bundle_sha256=_sha256(manifest_bytes),
+            memory_policy=memory_policy,
+            lineage_sha256=lineage_sha256,
         )
 
 
 class CandidateCompiler:
-    """Compile only verified v1 Teacher receipts; never fall back to old assets."""
+    """Compile a verified Teacher receipt without inventing missing v2 assets."""
 
     def compile(
         self,
@@ -353,21 +470,78 @@ class CandidateCompiler:
             response = json.loads(response_bytes)
         except (OSError, UnicodeError, json.JSONDecodeError) as error:
             raise ContractViolation("Teacher request/response is unreadable") from error
-        parsed = _parse_v1_exchange(request, response, request_bytes)
+        parsed = _parse_teacher_exchange(request, response, request_bytes)
         candidate = parsed["candidate"]
+        if parsed["candidate_schema_version"] == 1:
+            if (
+                not compile_spec.operator_id
+                or not compile_spec.operator_instruction
+                or not compile_spec.routes
+            ):
+                raise ContractViolation(
+                    "v1 Teacher candidate requires the legacy CompileSpec bridge"
+                )
+            operator_id = compile_spec.operator_id
+            operator_kind = "zero-arg"
+            operator_arguments: tuple[str, ...] = ()
+            operator_instruction = compile_spec.operator_instruction
+            routes = compile_spec.routes
+            memory_policy_payload: dict[str, Any] | None = None
+            preconditions: tuple[object, ...] = ()
+            expected_external_effect: object | None = None
+            expected_internal_effect: object | None = None
+            falsification: object | None = None
+        else:
+            (
+                operator_id,
+                operator_kind,
+                operator_arguments,
+                operator_instruction,
+            ) = _operator(candidate["operator"])
+            routes = _candidate_routes(candidate["router"], operator_id)
+            memory_value = candidate["memory_policy"]
+            memory_policy_payload = (
+                None if memory_value is None else dict(memory_value)
+            )
+            preconditions = tuple(candidate["preconditions"])
+            expected_external_effect = candidate["expected_external_effect"]
+            expected_internal_effect = candidate["expected_internal_effect"]
+            falsification = candidate["falsification"]
+
+        request_sha256 = _sha256(request_bytes)
+        response_sha256 = _sha256(response_bytes)
+        source_candidate_sha256 = content_sha256(candidate)
+        lineage = {
+            "parent_revision_id": compile_spec.parent_revision_id,
+            "source_candidate_sha256": source_candidate_sha256,
+            "compile_spec_sha256": compile_spec.content_sha256,
+            "request_sha256": request_sha256,
+            "response_sha256": response_sha256,
+        }
+        lineage_sha256 = content_sha256(lineage)
         change_set = CandidateChangeSet(
             candidate_id=compile_spec.candidate_id,
             revision_id=compile_spec.revision_id,
             parent_revision_id=compile_spec.parent_revision_id,
-            source_candidate_sha256=content_sha256(candidate),
+            source_candidate_sha256=source_candidate_sha256,
             compile_spec_sha256=compile_spec.content_sha256,
             protocol=candidate["protocol"],
             prompt_template=candidate["prompt_template"],
             skill_text=candidate["skill_text"],
             eval_note=candidate["eval_note"],
-            operator_id=compile_spec.operator_id,
-            operator_instruction=compile_spec.operator_instruction,
-            routes=compile_spec.routes,
+            operator_id=operator_id,
+            operator_instruction=operator_instruction,
+            routes=routes,
+            operator_kind=operator_kind,
+            operator_arguments=operator_arguments,
+            memory_policy=memory_policy_payload,
+            preconditions=preconditions,
+            expected_external_effect=expected_external_effect,
+            expected_internal_effect=expected_internal_effect,
+            falsification=falsification,
+            source_request_sha256=request_sha256,
+            source_response_sha256=response_sha256,
+            lineage_sha256=lineage_sha256,
         )
         skill = CompiledSkill(
             candidate_id=change_set.candidate_id,
@@ -376,21 +550,43 @@ class CandidateCompiler:
             protocol=change_set.protocol,
             prompt_template=change_set.prompt_template,
             skill_text=change_set.skill_text,
+            preconditions=change_set.preconditions,
+            expected_external_effect=change_set.expected_external_effect,
+            expected_internal_effect=change_set.expected_internal_effect,
+            falsification=change_set.falsification,
+            lineage_sha256=lineage_sha256,
         )
         operator = CompiledOperator(
             candidate_id=change_set.candidate_id,
             revision_id=change_set.revision_id,
             operator_id=change_set.operator_id,
-            kind="zero-arg",
-            arguments=(),
+            kind=change_set.operator_kind,
+            arguments=change_set.operator_arguments,
             instruction=change_set.operator_instruction,
+            parent_revision_id=change_set.parent_revision_id,
+            lineage_sha256=lineage_sha256,
         )
         router = CompiledRouter(
             candidate_id=change_set.candidate_id,
             revision_id=change_set.revision_id,
             routes=change_set.routes,
+            parent_revision_id=change_set.parent_revision_id,
+            lineage_sha256=lineage_sha256,
         )
-        _validate_compiled_projection(change_set, skill, operator, router)
+        memory_policy = (
+            None
+            if memory_policy_payload is None
+            else CompiledMemoryPolicy(
+                candidate_id=change_set.candidate_id,
+                revision_id=change_set.revision_id,
+                parent_revision_id=change_set.parent_revision_id,
+                policy=memory_policy_payload,
+                lineage_sha256=lineage_sha256,
+            )
+        )
+        _validate_compiled_projection(
+            change_set, skill, operator, router, memory_policy=memory_policy
+        )
 
         root = Path(output_root).resolve() / compile_spec.revision_id
         payloads: dict[str, bytes] = {
@@ -423,19 +619,26 @@ class CandidateCompiler:
             "COMPILED-OPERATOR.json": _compiled_encoded("operator", operator),
             "COMPILED-ROUTER.json": _compiled_encoded("router", router),
         }
+        if memory_policy is not None:
+            payloads["COMPILED-MEMORY-POLICY.json"] = _compiled_encoded(
+                "memory_policy", memory_policy
+            )
         artifacts = [
             {"path": name, "sha256": _sha256(content)}
             for name, content in payloads.items()
         ]
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "candidate_id": change_set.candidate_id,
             "revision_id": change_set.revision_id,
             "parent_revision_id": change_set.parent_revision_id,
             "revision_sha256": change_set.content_sha256,
             "compile_spec_sha256": compile_spec.content_sha256,
-            "request_sha256": _sha256(request_bytes),
-            "response_sha256": _sha256(response_bytes),
+            "request_sha256": request_sha256,
+            "response_sha256": response_sha256,
+            "lineage": lineage,
+            "lineage_sha256": lineage_sha256,
+            "memory_policy_present": memory_policy is not None,
             "provider": parsed["provider"],
             "model": parsed["model"],
             "cost_cny": parsed["cost_cny"],
@@ -447,11 +650,18 @@ class CandidateCompiler:
         return CompiledRevision.load(root)
 
 
-def _parse_v1_exchange(
+def _parse_teacher_exchange(
     request: object, response: object, request_bytes: bytes
 ) -> dict[str, Any]:
     if not isinstance(request, dict) or not isinstance(response, dict):
         raise ContractViolation("Teacher request/response must be JSON objects")
+    receipt_sha256 = response.get("receipt_sha256")
+    if receipt_sha256 is not None:
+        unsigned = {
+            key: value for key, value in response.items() if key != "receipt_sha256"
+        }
+        if receipt_sha256 != content_sha256(unsigned):
+            raise ContractViolation("Teacher response hash mismatch")
     if response.get("request_sha256") != _sha256(request_bytes):
         raise ContractViolation("Teacher response request hash mismatch")
     if (
@@ -464,13 +674,49 @@ def _parse_v1_exchange(
     if request.get("model") != model:
         raise ContractViolation("Teacher model identity mismatch")
     candidate = response.get("candidate")
-    required_candidate = {"protocol", "prompt_template", "skill_text", "eval_note"}
-    if not isinstance(candidate, dict) or set(candidate) != required_candidate:
-        raise ContractViolation("Teacher candidate fields are invalid")
-    candidate = {
-        name: _require_text(f"candidate {name}", candidate.get(name))
-        for name in sorted(required_candidate)
+    v1_fields = {"protocol", "prompt_template", "skill_text", "eval_note"}
+    v2_fields = v1_fields | {
+        "operator",
+        "router",
+        "memory_policy",
+        "preconditions",
+        "expected_external_effect",
+        "expected_internal_effect",
+        "falsification",
     }
+    if not isinstance(candidate, dict):
+        raise ContractViolation("Teacher candidate fields are invalid")
+    candidate_fields = frozenset(candidate)
+    if candidate_fields not in {frozenset(v1_fields), frozenset(v2_fields)}:
+        raise ContractViolation("Teacher candidate fields are invalid")
+    candidate_schema_version = 1 if set(candidate) == v1_fields else 2
+    candidate = dict(candidate)
+    candidate_sha256 = response.get("candidate_sha256")
+    if candidate_sha256 is not None and candidate_sha256 != content_sha256(candidate):
+        raise ContractViolation("Teacher candidate hash mismatch")
+    for name in v1_fields:
+        candidate[name] = _require_text(f"candidate {name}", candidate.get(name))
+    if candidate_schema_version == 2:
+        for name in ("operator", "router"):
+            value = candidate.get(name)
+            if not isinstance(value, dict) or not value:
+                raise ContractViolation(f"candidate {name} must be an object")
+        memory_policy = candidate.get("memory_policy")
+        if memory_policy is not None and (
+            not isinstance(memory_policy, dict) or not memory_policy
+        ):
+            raise ContractViolation("candidate memory_policy must be an object or null")
+        preconditions = candidate.get("preconditions")
+        if not isinstance(preconditions, list) or not preconditions:
+            raise ContractViolation("candidate preconditions are invalid")
+        for name in (
+            "expected_external_effect",
+            "expected_internal_effect",
+            "falsification",
+        ):
+            value = candidate.get(name)
+            if value is None or value == "" or value == [] or value == {}:
+                raise ContractViolation(f"candidate {name} must be non-empty")
     usage = response.get("usage")
     if not isinstance(usage, dict):
         raise ContractViolation("Teacher usage is invalid")
@@ -496,6 +742,7 @@ def _parse_v1_exchange(
         raise ContractViolation("Teacher pricing is invalid")
     return {
         "candidate": candidate,
+        "candidate_schema_version": candidate_schema_version,
         "provider": provider,
         "model": model,
         "usage": usage,
@@ -505,11 +752,66 @@ def _parse_v1_exchange(
     }
 
 
+# Kept for callers that imported the former private parser while v1 receipts
+# remain supported. New compilation always uses the schema-aware parser above.
+_parse_v1_exchange = _parse_teacher_exchange
+
+
+def _operator(value: object) -> tuple[str, str, tuple[str, ...], str]:
+    if not isinstance(value, dict):
+        raise ContractViolation("candidate Operator is invalid")
+    operator_id = value.get("id", value.get("operator_id"))
+    operator_id = _require_text("candidate Operator id", operator_id)
+    _require_identifier("candidate Operator id", operator_id)
+    kind = _require_text("candidate Operator kind", value.get("kind", "zero-arg"))
+    arguments = value.get("arguments", [])
+    if not isinstance(arguments, list) or any(
+        not isinstance(argument, str) or not argument.strip()
+        for argument in arguments
+    ):
+        raise ContractViolation("candidate Operator arguments are invalid")
+    instruction = _require_text(
+        "candidate Operator instruction", value.get("instruction")
+    )
+    return operator_id, kind, tuple(arguments), instruction
+
+
+def _candidate_routes(value: object, operator_id: str) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, dict) or not value:
+        raise ContractViolation("candidate Router is invalid")
+    raw_routes = value["routes"] if set(value) == {"routes"} else value
+    routes: list[tuple[str, str]] = []
+    if isinstance(raw_routes, dict):
+        rows: object = list(raw_routes.items())
+    else:
+        rows = raw_routes
+    if not isinstance(rows, list) or not rows:
+        raise ContractViolation("candidate Router routes are invalid")
+    for row in rows:
+        if isinstance(row, dict) and set(row) == {"task_id", "operator_id"}:
+            task_id = row["task_id"]
+            routed_operator = row["operator_id"]
+        elif isinstance(row, (tuple, list)) and len(row) == 2:
+            task_id, routed_operator = row
+        else:
+            raise ContractViolation("candidate Router route is invalid")
+        task_id = _require_text("candidate Router task_id", task_id)
+        _require_identifier("candidate Router task_id", task_id)
+        if routed_operator != operator_id:
+            raise ContractViolation("candidate Router references another Operator")
+        routes.append((task_id, operator_id))
+    if len({task_id for task_id, _ in routes}) != len(routes):
+        raise ContractViolation("candidate Router task IDs must be unique")
+    return tuple(routes)
+
+
 def _validate_compiled_projection(
     change_set: CandidateChangeSet,
     skill: CompiledSkill,
     operator: CompiledOperator,
     router: CompiledRouter,
+    *,
+    memory_policy: CompiledMemoryPolicy | None = None,
 ) -> None:
     identity = (change_set.candidate_id, change_set.revision_id)
     if any(
@@ -522,19 +824,99 @@ def _validate_compiled_projection(
         or skill.protocol != change_set.protocol
         or skill.prompt_template != change_set.prompt_template
         or skill.skill_text != change_set.skill_text
+        or skill.preconditions != change_set.preconditions
+        or skill.expected_external_effect != change_set.expected_external_effect
+        or skill.expected_internal_effect != change_set.expected_internal_effect
+        or skill.falsification != change_set.falsification
     ):
         raise ContractViolation("compiled Skill is not derived from the change set")
     if (
-        operator.kind != "zero-arg"
-        or operator.arguments
+        operator.kind != change_set.operator_kind
+        or operator.arguments != change_set.operator_arguments
         or operator.operator_id != change_set.operator_id
         or operator.instruction != change_set.operator_instruction
+        or operator.parent_revision_id not in {"", change_set.parent_revision_id}
     ):
-        raise ContractViolation("compiled Operator is not a zero-argument projection")
-    if router.routes != change_set.routes or any(
-        operator_id != operator.operator_id for _, operator_id in router.routes
+        raise ContractViolation("compiled Operator is not derived from the change set")
+    if (
+        router.routes != change_set.routes
+        or router.parent_revision_id not in {"", change_set.parent_revision_id}
+        or any(
+            operator_id != operator.operator_id for _, operator_id in router.routes
+        )
     ):
         raise ContractViolation("compiled Router is not derived from the change set")
+    if (memory_policy is None) != (change_set.memory_policy is None):
+        raise ContractViolation("compiled Memory Policy presence is invalid")
+    if memory_policy is not None:
+        if (
+            (memory_policy.candidate_id, memory_policy.revision_id) != identity
+            or memory_policy.parent_revision_id != change_set.parent_revision_id
+            or memory_policy.policy != change_set.memory_policy
+        ):
+            raise ContractViolation(
+                "compiled Memory Policy is not derived from the change set"
+            )
+
+
+def _validate_change_set_source(
+    change_set: CandidateChangeSet,
+    teacher: dict[str, Any],
+    compile_spec: CompileSpec,
+) -> None:
+    candidate = teacher["candidate"]
+    if (
+        change_set.protocol != candidate["protocol"]
+        or change_set.prompt_template != candidate["prompt_template"]
+        or change_set.skill_text != candidate["skill_text"]
+        or change_set.eval_note != candidate["eval_note"]
+        or change_set.source_candidate_sha256 != content_sha256(candidate)
+        or change_set.compile_spec_sha256 != compile_spec.content_sha256
+    ):
+        raise ContractViolation("compiled change set source projection mismatch")
+    expected: tuple[object, ...]
+    if teacher["candidate_schema_version"] == 1:
+        expected = (
+            compile_spec.operator_id,
+            "zero-arg",
+            (),
+            compile_spec.operator_instruction,
+            compile_spec.routes,
+            None,
+            (),
+            None,
+            None,
+            None,
+        )
+    else:
+        operator_id, kind, arguments, instruction = _operator(candidate["operator"])
+        memory = candidate["memory_policy"]
+        expected = (
+            operator_id,
+            kind,
+            arguments,
+            instruction,
+            _candidate_routes(candidate["router"], operator_id),
+            None if memory is None else dict(memory),
+            tuple(candidate["preconditions"]),
+            candidate["expected_external_effect"],
+            candidate["expected_internal_effect"],
+            candidate["falsification"],
+        )
+    actual = (
+        change_set.operator_id,
+        change_set.operator_kind,
+        change_set.operator_arguments,
+        change_set.operator_instruction,
+        change_set.routes,
+        change_set.memory_policy,
+        change_set.preconditions,
+        change_set.expected_external_effect,
+        change_set.expected_internal_effect,
+        change_set.falsification,
+    )
+    if actual != expected:
+        raise ContractViolation("compiled Harness source projection mismatch")
 
 
 def _cost(value: object) -> float:
@@ -617,6 +999,7 @@ __all__ = [
     "CandidateCompiler",
     "CompileSpec",
     "CompiledOperator",
+    "CompiledMemoryPolicy",
     "CompiledRevision",
     "CompiledRouter",
     "CompiledSkill",
