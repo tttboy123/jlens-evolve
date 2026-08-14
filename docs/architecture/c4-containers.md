@@ -1,61 +1,65 @@
 # v3.0 Container Architecture
 
-该图展示平台的主要可运行容器和持久化边界。内部 Python package 的进一步拆分属于组件级设计，不在容器图中展开。
+该图同时标出当前可运行边界和跨策略闭环的目标边界：`[LIVE]` 表示当前代码可执行，`[TARGET]` 表示设计目标、尚不可调用或部署。带有 `[TARGET]` 的关系同样不是当前行为。
 
 ```mermaid
 C4Container
-  title Container Architecture - v3.0 Evidence-Centric Evolution Platform
+  title Container Architecture - Current Runtime and Target Portfolio Closure
 
-  Person(operator, "Research Operator", "Runs campaigns and authorizes risky steps")
-  Person(reviewer, "Independent Reviewer", "Verifies claims and promotion evidence")
+  Person(operator, "Research Operator", "Runs campaigns and supplies explicit authorization")
+  Person(reviewer, "Independent Reviewer", "Audits sealed artifacts and promotion evidence")
 
-  System_Ext(taskSources, "Task Sources", "Benchmarks and curated task sets")
-  System_Ext(modelProviders, "Frozen Model Runtimes", "MLX and remote model APIs")
-  System_Ext(nativeHarness, "Native Evaluator Runtimes", "Project and benchmark harnesses")
-  System_Ext(probeRuntimes, "Probe Runtimes", "JLens, LB, logit and activation capture")
+  System_Ext(taskSources, "Feedback Task Sources", "Frozen catalogs and clean source checkouts")
+  System_Ext(modelProviders, "Model Runtimes", "Pinned local Qwen and configured Teacher transport")
+  System_Ext(nativeHarness, "Official Native Evaluator", "Pinned benchmark evaluator and harness")
 
   System_Boundary(platform, "Evidence-Centric Evolution Platform") {
-    Container(productApi, "Product API and CLI", "Python CLI/API", "Goals, campaigns, evidence, capabilities and releases")
-    Container(orchestrator, "Portfolio Orchestrator", "Python service", "Routes capability gaps and coordinates strategies")
-    Container(kernel, "Campaign Kernel", "Python runtime", "Authorization, budget, lease, checkpoint and lifecycle")
-    Container(execution, "Execution Runtime", "Python workers", "Materializes tasks and executes models, tools and evaluators")
-    Container(observerHub, "Observer Hub", "Python adapters", "Collects external, internal, outcome, cost and safety evidence")
-    Container(strategyHost, "Strategy Host", "Python plugins", "Legacy import, Skill paired A/B and AgentProgram search")
-    Container(analysis, "Evidence and Analysis Service", "Python service", "Aligns evidence, derives claims and mechanism hypotheses")
-    Container(governance, "Governance Service", "Python service", "Applies gate profiles and records promotion decisions")
-    ContainerDb(receiptStore, "Receipt and Artifact Store", "Append-only files/JSONL", "Immutable execution facts and content-addressed artifacts")
-    ContainerDb(registries, "Capability and AgentProgram Registries", "Versioned projections", "Validated components and immutable AgentProgram revisions")
+    Container(productCli, "[LIVE] Product CLI", "Python CLI", "Starts and resumes authorized campaigns")
+    Container(autonomousRunner, "[LIVE] Autonomous Skill Runner", "Python module", "Selects feedback tasks, proposes inactive revisions, seals rounds and resumes from accepted parents")
+    Container(kernel, "[LIVE] Campaign Kernel", "Python runtime", "Checks authorization and lifecycle boundaries")
+    Container(execution, "[LIVE] Execution Runtime", "Python runtime", "Executes bounded model, trace and evaluator plans")
+    Container(strategyHost, "[LIVE] Strategy Host", "Python strategies", "Runs Legacy import, Skill paired campaigns and fixture AgentProgram search")
+    Container(evidence, "[LIVE] Evidence and Governance Modules", "Python modules", "Builds evidence graphs, verifies Claims and applies gates")
+    ContainerDb(receiptStore, "[LIVE] Receipt and Artifact Store", "Append-only files", "Stores hash-bound runtime facts, Claims and sealed manifests")
+    ContainerDb(registries, "[LIVE] Versioned Registries", "JSONL projections", "Stores inactive Skills, capabilities and fixture AgentProgram revisions")
+    Container(capabilityGap, "[TARGET] CapabilityGap Queue", "Not implemented", "Would turn verified failure evidence into schedulable local capability gaps")
+    Container(portfolio, "[TARGET] Portfolio Orchestrator", "Not implemented", "Would coordinate gap research and non-fixture AgentProgram tournaments")
   }
 
-  Rel(operator, productApi, "Creates goals and authorizations", "CLI/API")
-  Rel(reviewer, productApi, "Queries evidence and records reviews", "Read-only API")
-  Rel(productApi, orchestrator, "Submits portfolio goals and campaign requests", "In-process API")
-  Rel(orchestrator, kernel, "Schedules authorized campaigns", "Campaign API")
-  Rel(kernel, strategyHost, "Requests strategy plans and decisions", "Plugin protocol")
-  Rel(kernel, execution, "Dispatches bounded execution plans", "Worker API")
-  Rel(execution, taskSources, "Materializes frozen task revisions", "Adapter API")
-  Rel(execution, modelProviders, "Requests deterministic inference", "Transport API")
-  Rel(execution, nativeHarness, "Runs official validation", "Isolated process")
-  Rel(execution, observerHub, "Publishes frozen rollout events", "Observer protocol")
-  Rel(observerHub, probeRuntimes, "Collects configured internal observations", "Probe adapter")
-  Rel(execution, receiptStore, "Appends runtime and evaluation receipts", "Atomic append")
-  Rel(observerHub, receiptStore, "Appends evidence envelopes", "Atomic append")
-  Rel(analysis, receiptStore, "Reads facts and appends versioned claims", "Projection API")
-  Rel(strategyHost, analysis, "Requests evidence views and proposes hypotheses", "Query API")
-  Rel(strategyHost, registries, "Publishes candidates and reads validated assets", "Registry API")
-  Rel(governance, receiptStore, "Reads claims and appends gate decisions", "Governance API")
-  Rel(governance, registries, "Promotes or retires versioned assets", "Registry state event")
+  Rel(operator, productCli, "Starts authorized runs and inspects results", "CLI")
+  Rel(reviewer, receiptStore, "Audits sealed artifacts and hash-bound evidence", "Read-only files")
+  Rel(productCli, autonomousRunner, "Runs or resumes autonomous Skill evolution", "In-process call")
+  Rel(productCli, kernel, "Starts explicit strategy campaigns", "In-process call")
+  Rel(autonomousRunner, kernel, "Runs baseline and taught Skill campaigns", "Campaign protocol")
+  Rel(kernel, strategyHost, "Requests plans and strategy decisions", "Strategy protocol")
+  Rel(kernel, execution, "Dispatches admitted execution plans", "Execution protocol")
+  Rel(execution, taskSources, "Loads admitted feedback tasks at exact revisions", "Filesystem")
+  Rel(execution, modelProviders, "Requests pinned inference", "Transport protocol")
+  Rel(execution, nativeHarness, "Runs official feedback evaluation", "Isolated process")
+  Rel(execution, receiptStore, "Appends model, trace and native receipts", "Atomic files")
+  Rel(evidence, receiptStore, "Reads receipts and appends verified projections", "Hash-verified files")
+  Rel(strategyHost, registries, "Writes inactive versioned assets", "Registry protocol")
+  Rel(evidence, registries, "Applies explicit verification and governance decisions", "Registry protocol")
+
+  Rel(evidence, capabilityGap, "[TARGET] Emits a verified, scoped gap", "Planned protocol")
+  Rel(capabilityGap, portfolio, "[TARGET] Queues capability research", "Planned protocol")
+  Rel(portfolio, strategyHost, "[TARGET] Schedules a local Skill campaign", "Planned protocol")
+  Rel(registries, portfolio, "[TARGET] Returns a validated inactive component", "Planned protocol")
+  Rel(portfolio, strategyHost, "[TARGET] Resumes a non-fixture AgentProgram tournament", "Planned protocol")
 
   UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
 ```
 
-## 容器职责摘要
+## 容器职责与状态
 
-| 容器 | 不负责什么 |
+| 容器 | 当前边界 |
 |---|---|
-| Campaign Kernel | 不理解 G0–G3、baseline/taught 或具体机制 |
-| Strategy Host | 不直接调用模型、shell、workspace 或 evaluator |
-| Observer Hub | 不判断候选是否晋升 |
-| Analysis Service | 不修改原始 Receipt，只追加 Claim |
-| Governance Service | 不生成候选，只判断证据是否满足门禁 |
-| Registries | 不保存运行事实，只保存版本化产品资产投影 |
+| Autonomous Skill Runner | accepted、已密封且 manifest 验证通过的 round 是下一轮 parent authority；`BEST-HARNESS.json` 只是 hash-verified projection |
+| Strategy Host | Skill paired 为 LIVE；Legacy 仅只读兼容导入；AgentProgram 仅 fixture profile 为 LIVE，non-fixture 为 `not-yet-live` |
+| Execution Runtime | 执行 Kernel 已准入的计划；不决定候选是否晋升 |
+| Evidence and Governance Modules | 不修改原始 Receipt；验证 Claim 和显式门禁，且不会自动激活 Skill |
+| Versioned Registries | 保存版本化资产投影，不替代运行事实和 sealed-round 决策 |
+| CapabilityGap Queue | **TARGET**：当前没有自动生成或消费 `CapabilityGap` 的运行路径 |
+| Portfolio Orchestrator | **TARGET**：当前没有把 Skill 增益自动接入 non-fixture AgentProgram 的编排器 |
+
+目标闭环为 `verified failure → CapabilityGap → Portfolio → local Skill research → validated inactive component → non-fixture AgentProgram → new evidence/failure`；图中完整画出该环路并不表示它已经实现。

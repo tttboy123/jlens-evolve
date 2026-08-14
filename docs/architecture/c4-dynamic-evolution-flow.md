@@ -1,53 +1,71 @@
 # v3.0 Dynamic Evolution Flow
 
-该流程展示一次完整的“Evidence → 局部能力 → AgentProgram → 晋升”循环。第三代局部能力验证嵌套在第二代完整 AgentProgram 搜索中，第一代历史资产作为可重放 seed 输入。
+该动态图把当前可执行的 autonomous Skill round 与未来跨策略闭环放在同一视图。`[LIVE]` 步骤由当前代码支持；`[TARGET]` 步骤仅描述目标架构，当前没有自动 `CapabilityGap`、Portfolio Orchestrator 或 non-fixture AgentProgram 执行路径。
 
 ```mermaid
 C4Dynamic
-  title Dynamic Flow - Evidence to Validated Agent Capability
+  title Dynamic Flow - Live Autonomous Skill Round and Target Portfolio Loop
 
-  Person(operator, "Research Operator", "Defines goals and authorization")
+  Person(operator, "Research Operator", "Defines authorization and bounded inputs")
 
-  Container(orchestrator, "Portfolio Orchestrator", "Python", "Coordinates strategies")
-  Container(kernel, "Campaign Kernel", "Python", "Controls lifecycle and budget")
-  Container(strategy, "Strategy Host", "Python plugins", "Runs legacy, Skill and AgentProgram protocols")
-  Container(runtime, "Execution Runtime", "Python workers", "Executes frozen rollouts")
-  Container(observer, "Observer Hub", "Python adapters", "Collects multi-source evidence")
-  Container(analysis, "Evidence Analysis", "Python", "Aligns evidence and derives hypotheses")
-  Container(registry, "Capability Registry", "Versioned projection", "Stores validated components")
-  Container(governance, "Governance Service", "Python", "Applies promotion gates")
-  ContainerDb(store, "Receipt Store", "Append-only JSONL", "Stores immutable facts and claims")
+  Container(cli, "[LIVE] Product CLI", "Python CLI", "Starts and resumes campaigns")
+  Container(runner, "[LIVE] Autonomous Skill Runner", "Python", "Selects feedback tasks and seals round decisions")
+  Container(kernel, "[LIVE] Campaign Kernel", "Python", "Admits plans and controls campaign lifecycle")
+  Container(strategy, "[LIVE] Skill Paired Strategy", "Python", "Plans matched baseline and taught execution")
+  Container(runtime, "[LIVE] Execution Runtime", "Python", "Runs model, external-trace and native evaluation")
+  Container(evidence, "[LIVE] Evidence and Governance", "Python", "Verifies receipts, Claims and acceptance gates")
+  ContainerDb(store, "[LIVE] Receipt and Artifact Store", "Append-only files", "Stores runtime facts, round results and manifests")
+  ContainerDb(best, "[LIVE] BEST Projection", "Hash-verified JSON", "Reloadable projection of the accepted sealed-round parent")
 
-  Rel(operator, orchestrator, "1. Defines goal, budget and risk authorization", "CLI/API")
-  Rel(orchestrator, kernel, "2. Creates baseline AgentProgram campaign", "Campaign API")
-  Rel(kernel, strategy, "3. Requests an AgentProgram execution plan", "Strategy protocol")
-  Rel(strategy, runtime, "4. Submits frozen baseline plan through Kernel", "ExecutionPlan")
-  Rel(runtime, observer, "5. Publishes rollout events for configured observation", "Observer protocol")
-  Rel(runtime, store, "6. Appends model, patch and native evaluation receipts", "Atomic append")
-  Rel(observer, store, "7. Appends external and internal evidence", "EvidenceEnvelope")
-  Rel(analysis, store, "8. Reads aligned evidence and appends failure hypothesis", "Claim API")
-  Rel(orchestrator, strategy, "9. Starts Skill paired campaign for capability gap", "Campaign request")
-  Rel(strategy, runtime, "10. Runs matched baseline, taught and ablation plans", "ExecutionPlan")
-  Rel(analysis, store, "11. Derives counterfactual and cross-task mechanism claims", "Claim API")
-  Rel(strategy, registry, "12. Publishes native-validated Skill or Operator", "Registry API")
-  Rel(orchestrator, strategy, "13. Resumes AgentProgram tournament with validated components", "Campaign request")
-  Rel(governance, store, "14. Verifies regression, transfer, holdout and audit evidence", "Gate query")
-  Rel(governance, registry, "15. Records human-approved promotion or retirement", "State event")
+  Container(gap, "[TARGET] CapabilityGap", "Not implemented", "Would scope a reusable failure-derived capability need")
+  Container(portfolio, "[TARGET] Portfolio Orchestrator", "Not implemented", "Would schedule cross-strategy research")
+  Container(localResearch, "[TARGET] Local Capability Research", "Planned Skill campaign", "Would validate an inactive Skill or Operator")
+  Container(program, "[TARGET] Non-fixture AgentProgram Tournament", "Not implemented", "Would compose validated components and produce new evidence")
+
+  Rel(operator, cli, "[LIVE 1] Supplies explicit authorization and run configuration", "CLI")
+  Rel(cli, runner, "[LIVE 2] Starts or resumes autonomous Skill evolution", "In-process call")
+  Rel(runner, store, "[LIVE 3] Verifies the latest accepted sealed round as parent authority", "Manifest and round index")
+  Rel(runner, kernel, "[LIVE 4] Submits baseline and taught feedback campaigns", "Campaign protocol")
+  Rel(kernel, strategy, "[LIVE 5] Requests matched, bounded execution plans", "Strategy protocol")
+  Rel(strategy, runtime, "[LIVE 6] Executes baseline and candidate-consuming taught plans through Kernel", "ExecutionPlan")
+  Rel(runtime, store, "[LIVE 7] Appends model, external-trace and official native receipts", "Atomic files")
+  Rel(evidence, store, "[LIVE 8] Verifies paired receipts and appends Claims and campaign feedback", "Hash-verified projection")
+  Rel(runner, store, "[LIVE 9] Freezes AUTONOMOUS-ROUND-RESULT, manifest and accepted decision", "Sealed artifacts")
+  Rel(runner, best, "[LIVE 10] Exports and hash-reloads the accepted parent projection", "BEST-HARNESS.json")
+
+  Rel(evidence, gap, "[TARGET 11] Derives a verified reusable capability gap", "Planned protocol")
+  Rel(gap, portfolio, "[TARGET 12] Queues scoped capability research", "Planned protocol")
+  Rel(portfolio, localResearch, "[TARGET 13] Starts matched local validation", "Planned campaign")
+  Rel(localResearch, portfolio, "[TARGET 14] Returns a validated inactive component", "Planned registry event")
+  Rel(portfolio, program, "[TARGET 15] Resumes a non-fixture tournament with that component", "Planned campaign")
+  Rel(program, evidence, "[TARGET 16] Produces official evidence and new failure facts", "Planned receipts")
 ```
 
-## 关键流转
+## 当前 LIVE 链路
 
 ```text
-Legacy evidence
-→ verified seed
-→ AgentProgram baseline
-→ multi-source Evidence
-→ Capability Gap
-→ Skill/Operator paired validation
-→ Capability Registry
-→ AgentProgram tournament
-→ regression/holdout/audit
-→ human promotion
+authorized feedback tasks
+→ matched baseline/taught Skill execution
+→ model + external-trace + official native receipts
+→ verified Claims and Teacher-safe campaign feedback
+→ sealed AUTONOMOUS-ROUND-RESULT + manifest + round-index decision
+→ accepted sealed round becomes next parent authority
+→ BEST-HARNESS.json is exported only as its hash-verified projection
 ```
 
-任何步骤失败都必须生成可重放 Receipt；失败、回归、中性和基础设施错误均保留，不得只保存成功路径。
+只有 `accepted_as_best` 的 sealed round 在 manifest 和 round-index 验证后才能成为下一轮 parent。单独出现或被修改的 `BEST-HARNESS.json` 不能晋升候选、覆盖 round 决策或充当第二套 authority。新 revision 仍默认 inactive。
+
+## 完整 TARGET 闭环
+
+```text
+verified failure evidence
+→ CapabilityGap
+→ Portfolio Orchestrator
+→ local Skill/Operator paired validation
+→ validated inactive component
+→ non-fixture AgentProgram tournament
+→ official evidence and new failure facts
+→ CapabilityGap (next iteration)
+```
+
+这个闭环目前尚未实现。当前 AgentProgram 仅支持显式 `execution_profile=fixture`：它可验证 revision/search-parent 机制，但不声明 native gain，也不具备 promotion eligibility。Legacy 仅是只读兼容导入。已准入执行产生的失败事实会作为 hash-bound receipts 保留；在准入前被拒绝的输入 fail closed，不伪造执行 Receipt。

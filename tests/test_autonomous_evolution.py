@@ -15,7 +15,7 @@ from evolve.autonomous import (
     EvolutionDependencies,
     PrescreenResult,
 )
-from evolve.autonomous.output import load_best_harness
+from evolve.autonomous.output import load_best_harness, seal_manifest
 from evolve.autonomous.runner import RoundExecutionRequest
 from evolve.cli import main
 from evolve.contracts import (
@@ -575,6 +575,11 @@ def test_public_cli_runs_two_real_feedback_rounds_and_replays_without_calls(
         lambda _config: dependencies,
     )
     config_path = _config(tmp_path)
+    config_payload = json.loads(config_path.read_text())
+    task_pool = Path(config_payload["swe_bench"]["task_pool"])
+    task_rows = json.loads(task_pool.read_text())
+    task_rows[0]["future_private_checkout"] = "/private/internal/task.db"
+    task_pool.write_text(json.dumps(task_rows), encoding="utf-8")
     output = tmp_path / "output"
 
     assert main(
@@ -618,6 +623,12 @@ def test_public_cli_runs_two_real_feedback_rounds_and_replays_without_calls(
     selection = json.loads((first_round / "TASK-SELECTION.json").read_text())
     assert len(selection["tasks"]) == 3
     assert all("task_fingerprint_sha256" in task for task in selection["tasks"])
+    assert len(selection["selection_context_sha256"]) == 64
+    assert selection["selection_context"]["mode"] == "stateful-v1"
+    assert all(
+        "future_private_checkout" not in task
+        for task in teacher_requests[0]["failure_package"]["selected_tasks"]
+    )
 
     assert main(
         [
@@ -632,6 +643,211 @@ def test_public_cli_runs_two_real_feedback_rounds_and_replays_without_calls(
     ) == 0
     capsys.readouterr()
     assert len(teacher_requests) == 2
+
+
+def test_public_cli_selection_binds_complete_history_and_resume_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=StructuralFailureFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    config_path = _config(tmp_path)
+    config = json.loads(config_path.read_text())
+    config["goal"]["max_rounds"] = 3
+    config["goal"]["no_progress_patience"] = 3
+    config["goal"]["max_same_failure_signature"] = 4
+    config["goal"]["target_native_gains"] = 99
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    output = tmp_path / "history-bound-selection"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(config_path),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+
+    assert main(argv) == 0
+    assert len(teacher_requests) == 3
+    third = json.loads(
+        (output / "rounds/round-0002/TASK-SELECTION.json").read_text()
+    )
+    context = third["selection_context"]
+    assert len(context["historical_claims"]) == 6
+    assert sum(context["task_selection_counts"].values()) == 6
+    assert sum(context["failure_signature_counts"].values()) == 3
+    assert context["current_best_revision_id"] is not None
+    assert context["goal_gap"] == 96
+    preserved = canonical_json(third)
+
+    assert main(argv) == 0
+    assert canonical_json(
+        json.loads((output / "rounds/round-0002/TASK-SELECTION.json").read_text())
+    ) == preserved
+    assert len(teacher_requests) == 3
+
+
+def test_public_cli_blocks_tampered_best_projection_before_teacher_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evolve.autonomous.goal import GoalStateStore
+
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    original_write = GoalStateStore.write
+    interrupted = False
+
+    def interrupt_state_write(self, state):
+        nonlocal interrupted
+        if state.rounds_completed == 1 and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("after sealed accepted round")
+        return original_write(self, state)
+
+    monkeypatch.setattr(GoalStateStore, "write", interrupt_state_write)
+    output = tmp_path / "tampered-best-resume"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(_config(tmp_path)),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+    with pytest.raises(KeyboardInterrupt):
+        main(argv)
+    best_path = output / "best/BEST-HARNESS.json"
+    best = json.loads(best_path.read_text())
+    best["supported_task_signatures"] = ["forged-task"]
+    best_path.write_text(json.dumps(best), encoding="utf-8")
+
+    assert main(argv) == 0
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "blocked_integrity"
+    assert len(teacher_requests) == 1
+    block = json.loads(
+        (output / "rounds/round-0001/INTEGRITY-BLOCK.json").read_text()
+    )
+    assert block["phase"] == "best-harness-projection"
+
+
+def test_public_cli_rejects_resealed_terminal_best_projection_forgery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    output = tmp_path / "terminal-best-forgery"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(_config(tmp_path)),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+    assert main(argv) == 0
+    assert len(teacher_requests) == 2
+    best_path = output / "best/BEST-HARNESS.json"
+    best = json.loads(best_path.read_text())
+    best["source_claim_ids"] = ["forged-claim"]
+    best_path.write_text(json.dumps(best), encoding="utf-8")
+    seal_manifest(output)
+
+    assert main(argv) == 0
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "blocked_integrity"
+    assert len(teacher_requests) == 2
+    block = json.loads(
+        (output / "rounds/round-0002/INTEGRITY-BLOCK.json").read_text()
+    )
+    assert block["phase"] == "best-harness-projection"
+
+
+def test_public_cli_rejects_unindexed_best_after_crash_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evolve.autonomous.runner as runner_module
+
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    original_freeze = runner_module.freeze_json
+    interrupted = False
+
+    def interrupt_round_result(path: Path, payload: Mapping[str, Any]) -> Path:
+        nonlocal interrupted
+        if (
+            path.name == "AUTONOMOUS-ROUND-RESULT.json"
+            and path.parent.name == "round-0001"
+            and not interrupted
+        ):
+            interrupted = True
+            raise KeyboardInterrupt("after BEST projection before round authority")
+        return original_freeze(path, payload)
+
+    monkeypatch.setattr(runner_module, "freeze_json", interrupt_round_result)
+    output = tmp_path / "unindexed-best-crash"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(_config(tmp_path)),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+    with pytest.raises(KeyboardInterrupt):
+        main(argv)
+    assert json.loads(
+        (output / "best/BEST-HARNESS.json").read_text()
+    )["harness_kind"] == "compiled-candidate"
+
+    assert main(argv) == 0
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "blocked_integrity"
+    assert len(teacher_requests) == 2
+    block = json.loads(
+        (output / "rounds/round-0001/INTEGRITY-BLOCK.json").read_text()
+    )
+    assert block["phase"] == "best-harness-projection"
 
 
 def test_public_cli_carries_authoritative_paired_failures_into_next_teacher(

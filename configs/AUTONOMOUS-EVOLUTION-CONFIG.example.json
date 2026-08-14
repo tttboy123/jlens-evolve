@@ -20,7 +20,7 @@
     ]
   },
   "swe_bench": {
-    "task_pool": "/absolute/path/to/feedback-task-pool.json",
+    "task_pool": "/absolute/path/to/FEEDBACK-TASK-POOL.json",
     "source_pool": "/absolute/path/to/clean-feedback-checkouts",
     "official_harness": "/absolute/path/to/pinned-swebench",
     "official_evaluator": "/absolute/path/to/official_patch_evaluator.py",

@@ -176,12 +176,30 @@ def load_best_harness(
 ) -> CompiledRevision | None:
     """Hash-verify a BEST-HARNESS projection for the frozen model runtime."""
 
+    return verify_best_harness(
+        path,
+        expected_model_identity_sha256=expected_model_identity_sha256,
+    )
+
+
+def verify_best_harness(
+    path: str | Path,
+    *,
+    expected_model_identity_sha256: str,
+    accepted_round: Mapping[str, Any] | None = None,
+) -> CompiledRevision | None:
+    """Verify BEST-HARNESS against runtime and optional accepted-round authority."""
+
     source = Path(path).resolve()
     try:
         harness = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ContractViolation("BEST-HARNESS is unreadable") from error
-    if not isinstance(harness, dict) or harness.get("schema_version") != 1:
+    if (
+        not isinstance(harness, dict)
+        or set(harness) != _BEST_HARNESS_FIELDS
+        or harness.get("schema_version") != 1
+    ):
         raise ContractViolation("BEST-HARNESS schema is invalid")
     if harness.get("model_identity_sha256") != expected_model_identity_sha256:
         raise ContractViolation("BEST-HARNESS model identity mismatch")
@@ -206,9 +224,19 @@ def load_best_harness(
                     "router_path",
                     "memory_policy_path",
                 )
-            )
+                )
+            ):
+                raise ContractViolation("empty BEST-HARNESS identity is invalid")
+        for name in (
+            "supported_task_signatures",
+            "native_gain_task_ids",
+            "regression_task_ids",
+            "source_claim_ids",
         ):
-            raise ContractViolation("empty BEST-HARNESS identity is invalid")
+            if harness.get(name) != []:
+                raise ContractViolation("empty BEST-HARNESS list projection is invalid")
+        if accepted_round is not None:
+            _verify_empty_round_projection(harness, accepted_round)
         return None
     if kind != "compiled-candidate":
         raise ContractViolation("BEST-HARNESS kind is unsupported")
@@ -231,7 +259,123 @@ def load_best_harness(
     }
     if any(harness.get(name) != value for name, value in expected_paths.items()):
         raise ContractViolation("BEST-HARNESS artifact projection mismatch")
+    for name in (
+        "supported_task_signatures",
+        "native_gain_task_ids",
+        "regression_task_ids",
+        "source_claim_ids",
+    ):
+        _string_list(harness.get(name), f"BEST-HARNESS {name}")
+    if accepted_round is not None:
+        _verify_accepted_round_projection(harness, accepted_round)
     return compiled
+
+
+_BEST_HARNESS_FIELDS = {
+    "schema_version",
+    "harness_kind",
+    "model_identity_sha256",
+    "candidate_id",
+    "candidate_revision_id",
+    "compiled_bundle_sha256",
+    "skill_path",
+    "operator_path",
+    "router_path",
+    "memory_policy_path",
+    "supported_task_signatures",
+    "native_gain_task_ids",
+    "regression_task_ids",
+    "source_claim_ids",
+    "active",
+}
+
+
+def _verify_empty_round_projection(
+    harness: Mapping[str, Any], accepted_round: Mapping[str, Any]
+) -> None:
+    if (
+        accepted_round.get("accepted_as_best") is not False
+        or accepted_round.get("candidate_id") is not None
+        or accepted_round.get("candidate_revision_id") != "empty-harness-v1"
+        or accepted_round.get("compiled_bundle_sha256")
+        != harness.get("compiled_bundle_sha256")
+        or accepted_round.get("claims") not in (None, [])
+    ):
+        raise ContractViolation("BEST-HARNESS authoritative round projection mismatch")
+
+
+def _verify_accepted_round_projection(
+    harness: Mapping[str, Any], accepted_round: Mapping[str, Any]
+) -> None:
+    if (
+        accepted_round.get("accepted_as_best") is not True
+        or accepted_round.get("candidate_id") != harness.get("candidate_id")
+        or accepted_round.get("candidate_revision_id")
+        != harness.get("candidate_revision_id")
+        or accepted_round.get("compiled_bundle_sha256")
+        != harness.get("compiled_bundle_sha256")
+    ):
+        raise ContractViolation("BEST-HARNESS authoritative round projection mismatch")
+    claims = accepted_round.get("claims")
+    if not isinstance(claims, list):
+        raise ContractViolation("BEST-HARNESS authoritative round projection mismatch")
+    expected = _claim_projection(claims)
+    actual = {
+        "supported_task_signatures": harness.get("supported_task_signatures"),
+        "native_gain_task_ids": harness.get("native_gain_task_ids"),
+        "regression_task_ids": harness.get("regression_task_ids"),
+        "source_claim_ids": harness.get("source_claim_ids"),
+    }
+    if actual != expected:
+        raise ContractViolation("BEST-HARNESS authoritative round projection mismatch")
+
+
+def _claim_projection(claims: Sequence[Any]) -> dict[str, list[str]]:
+    rows: list[Mapping[str, Any]] = []
+    for claim in claims:
+        if not isinstance(claim, Mapping):
+            raise ContractViolation("BEST-HARNESS authoritative claim is invalid")
+        rows.append(claim)
+    task_ids = [_required_text(row.get("task_id"), "task_id") for row in rows]
+    claim_ids = [_required_text(row.get("claim_id"), "claim_id") for row in rows]
+    if (
+        not task_ids
+        or len(set(task_ids)) != len(task_ids)
+        or len(set(claim_ids)) != len(claim_ids)
+    ):
+        raise ContractViolation(
+            "BEST-HARNESS authoritative claims must be non-empty and unique"
+        )
+    return {
+        "supported_task_signatures": sorted(set(task_ids)),
+        "native_gain_task_ids": sorted(
+            task_id
+            for task_id, row in zip(task_ids, rows, strict=True)
+            if row.get("classification") == "gain"
+        ),
+        "regression_task_ids": sorted(
+            task_id
+            for task_id, row in zip(task_ids, rows, strict=True)
+            if row.get("classification") == "regression"
+        ),
+        "source_claim_ids": claim_ids,
+    }
+
+
+def _required_text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ContractViolation(f"BEST-HARNESS authoritative {field} is invalid")
+    return value
+
+
+def _string_list(value: Any, field: str) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(item, str) or not item for item in value)
+        or len(set(value)) != len(value)
+    ):
+        raise ContractViolation(f"{field} is invalid")
+    return value
 
 
 def seal_manifest(root: str | Path) -> int:

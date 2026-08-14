@@ -38,21 +38,43 @@ The task-pool file is either a JSON list of task objects or an object with
   },
   "tasks": [
     {
+      "schema_version": 1,
       "instance_id": "project__issue-1",
-      "project": "project",
+      "task_id": "legacy-route-project__issue-1",
+      "project": "owner/project",
+      "repo": "owner/project",
       "benchmark_id": "swe-bench-verified",
       "cohort": "feedback",
       "source_uri": "/absolute/source-pool/project__issue-1",
-      "base_revision": "<40-character Git SHA>"
+      "source_repository": "/absolute/read-only/source-cache/owner/project",
+      "base_revision": "<40-character Git SHA>",
+      "source_revision": "<same 40-character Git SHA>",
+      "benchmark_base_commit": "<same 40-character Git SHA>",
+      "catalog_fingerprint": "<64-character SHA-256 from the frozen catalog>",
+      "fingerprint": "<same catalog SHA-256 used by the legacy Qwen adapter>",
+      "instruction": "The complete feedback-task instruction.",
+      "instruction_sha256": "<SHA-256 of the instruction bytes>",
+      "allowed_targets": [
+        "src/project/module.py",
+        "tests/test_module.py"
+      ]
     }
   ]
 }
 ```
 
-Every `source_uri` must resolve below the configured `source_pool`. The loader
-rejects holdout, final-sealed, burned, r076, and r078 identifiers before task
-selection. Each frozen selection contains the complete selected task records and
-their literal SHA-256 fingerprints.
+This is the real local-Qwen task-row shape, not a minimal catalog sketch.
+`catalog_fingerprint` is mandatory for native execution. `task_id`,
+`benchmark_base_commit`, `fingerprint`, `instruction`, and `allowed_targets`
+are consumed by the compatibility Qwen adapter. `task_fingerprint_sha256` is
+not an input field: the autonomous selector derives it from the complete row
+and freezes it in `TASK-SELECTION.json`.
+
+Every `source_uri` must resolve below the configured `source_pool`, identify a
+clean checkout at `base_revision`, and agree with the catalog and benchmark
+revision fields. The loader rejects holdout, final-sealed, burned, r076, and
+r078 identifiers before task selection. Each frozen selection contains the
+complete selected task records and their derived literal SHA-256 fingerprints.
 
 ## Run and resume
 
@@ -86,7 +108,10 @@ a ModelReceipt. `native_finalist_count` must be `1`.
   identity and authoritative budget events.
 - `rounds/round-XXXX/`: task, baseline, Teacher, compiled Harness, prescreen,
   Campaign result, Receipts, Evidence Graph, native evidence, and manifest.
-- `best/BEST-HARNESS.json`: current best inactive external asset.
+- `rounds/round-XXXX/AUTONOMOUS-ROUND-RESULT.json`: sealed round decision,
+  including whether that exact candidate was accepted as the search parent.
+- `best/BEST-HARNESS.json`: hash-verified convenience projection of the current
+  accepted parent, not an independent parent-selection authority.
 - `EVOLUTION-RESULT.json`: stop reason, gains, cost, evidence mode, and safety
   attestations.
 
@@ -113,9 +138,18 @@ compiled = load_best_harness(
 otherwise it is a fully reloadable `CompiledRevision`, including its frozen
 Teacher request/response, compile spec, cost/model receipts, Candidate,
 Skill/Operator/Router and optional Memory Policy. Baseline in the next round
-loads this Harness as the parent; the proposed Candidate is only consumed by
-taught execution. `active` remains `false`: Governance does not auto-activate a
-Skill or Capability.
+loads the compiled artifacts from the latest accepted, manifest-verified sealed
+round. On resume, `ROUND-INDEX.jsonl` plus that round's verified manifest and
+`accepted_as_best` decision are the parent authority. `BEST-HARNESS.json` is
+exported from those same artifacts and must hash-reload to the same bundle; it
+cannot promote a candidate or override the sealed-round decision. The proposed
+Candidate is only consumed by taught execution. `active` remains `false`:
+Governance does not auto-activate a Skill or Capability.
+
+Each completed round also freezes Teacher-safe `campaign_feedback`, rebuilt
+from authoritative model, external-trace and native receipts. The next round
+carries it unchanged as `prior_campaign_feedback`; patch bytes, prompts and
+unrecognized raw error text are not sent to the Teacher.
 
 ## Stop conditions and safety
 
@@ -137,11 +171,14 @@ python3 -m evolve campaign import --strategy legacy --config IMPORT.json --outpu
 python3 -m evolve campaign run --strategy agent-program --config PROGRAM.json --output RUN
 ```
 
-Skill-paired is live. Legacy import is a read-only compatibility campaign.
-AgentProgram is live only for an explicit deterministic `execution_profile` of
-`fixture`: it loads complete hash-verified Program revisions, executes every
-parent/candidate through the common `ExecutionRuntime`, records inactive
-AgentProgram Registry rows, and advances a hash-bound search parent. Fixture
-tournaments always report `claims=[]`, `native_gain_claimed=false`, and
+Skill-paired is the current LIVE native campaign. Legacy import is a read-only
+compatibility campaign, not a new evidence-minting path. AgentProgram is LIVE
+only for an explicit deterministic `execution_profile` of `fixture`: it loads
+complete hash-verified Program revisions, executes every parent/candidate
+through the common `ExecutionRuntime`, records inactive AgentProgram Registry
+rows, and advances a hash-bound fixture search parent. Fixture tournaments
+always report `claims=[]`, `native_gain_claimed=false`, and
 `promotion_eligible=false`; non-fixture AgentProgram execution remains
-`not-yet-live` rather than silently falling back.
+`not-yet-live` and never silently falls back. Automatic `CapabilityGap` creation
+and a Portfolio Orchestrator joining Skill campaigns to non-fixture
+AgentProgram tournaments are TARGET architecture, not current product behavior.

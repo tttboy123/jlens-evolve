@@ -20,7 +20,7 @@ from .runner import (
     RoundExecutionRequest,
     build_default_dependencies,
 )
-from .task_selector import FeedbackTaskSelector, TaskSelection
+from .task_selector import FeedbackTaskSelector, TaskSelection, TaskSelectionContext
 
 __all__ = [
     "AutonomousEvolutionConfig",
@@ -40,6 +40,7 @@ __all__ = [
     "RoundExecutionRequest",
     "SweBenchConfig",
     "TaskSelection",
+    "TaskSelectionContext",
     "TeacherConfig",
     "build_default_dependencies",
     "load_best_harness",

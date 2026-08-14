@@ -6,9 +6,10 @@
 | Direct strategy model/evaluator calls | `evolve.runtime.ExecutionRuntime` | replaced |
 | Per-loop evidence/catalog facts | `evolve.evidence.ReceiptStore` and `EvidenceGraph` | replaced for new campaigns |
 | Round reports as truth | receipts + claims, projected by `evolve.reporting` | replaced |
-| First-generation replay | `LegacyImportStrategy` | compatibility facade |
-| Third-generation paired Skill A/B | `SkillPairedStrategy` | compatibility adapter |
-| Second-generation tournaments | `AgentProgramSearchStrategy` | compatibility adapter |
+| First-generation replay | `LegacyImportStrategy` | read-only compatibility facade; LIVE for import only |
+| Third-generation paired Skill A/B | `SkillPairedStrategy` | LIVE native campaign |
+| Second-generation tournaments | `AgentProgramSearchStrategy` | fixture profile LIVE; non-fixture `not-yet-live` |
+| Cross-strategy capability-gap scheduling | Portfolio Orchestrator + `CapabilityGap` | TARGET; not implemented |
 | Local Qwen operator/span execution | `LegacyQwenPairTransport` behind `ExecutionRuntime` | live compatibility transport |
 | Official SWE-bench invocation | `LegacyOfficialNativeEvaluator` behind `ExecutionRuntime` | live compatibility evaluator |
 | Mutable task checkout selection | `FrozenSourceWorkspaceManager` | replaced with clean, exact-revision admission |
@@ -51,6 +52,13 @@ Governance authority may create a Capability, still inactive by default. The
 Capability Registry accepts only the concrete verifying decision log, not a
 duck-typed reader returning hand-built approvals.
 
+For autonomous Skill evolution, the next baseline parent is authorized by the
+latest `accepted_as_best` decision in a sealed round whose manifest and
+hash-chained round-index entry verify. `best/BEST-HARNESS.json` is a reloadable,
+hash-verified projection exported from that accepted round. It is not a second
+registry, cannot make an unaccepted candidate authoritative, and cannot
+override the sealed round during resume.
+
 The CLI rejects non-feedback tasks, source revision drift, dirty checkouts,
 evaluator/model hash drift, a config not bound to the current Git commit, and
 receipt/manifest hash mismatch. `r076`, `r078`, fresh holdout and final-sealed
@@ -65,3 +73,16 @@ The historical repository remains immutable and is referenced by content hash. N
 legacy schema reader, sealed artifact, Catalog, review, or cost ledger was deleted.
 Physical deletion from the legacy repository is deferred until semantic replay
 equivalence is independently demonstrated.
+
+## Current strategy boundary
+
+- **Skill:** LIVE for feedback-only matched baseline/taught Qwen execution and
+  official native evaluation.
+- **Legacy:** LIVE only as a read-only compatibility import. It does not mint
+  current native Claims or become the autonomous parent authority.
+- **AgentProgram:** LIVE only with deterministic `execution_profile=fixture`.
+  Fixture results remain inactive and explicitly ineligible for native gain or
+  promotion claims. Non-fixture execution is `not-yet-live`.
+- **Portfolio closure:** automatic `CapabilityGap` production, portfolio
+  scheduling, and feeding validated local capabilities into a non-fixture
+  AgentProgram tournament remain TARGET architecture.
