@@ -51,6 +51,9 @@ class ReceiptSink(Protocol):
 class RuntimeEntry(Protocol):
     """Strategy-facing seam: plans enter here, never through adapters directly."""
 
+    @property
+    def remote(self) -> bool: ...
+
     def execute(
         self,
         plan: ExecutionPlan,

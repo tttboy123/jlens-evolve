@@ -13,6 +13,7 @@ from evolve.agent_program import (
     SearchParentLog,
     TournamentAuthority,
 )
+from evolve.cli import main
 from evolve.contracts import (
     Cohort,
     ExecutionLimits,
@@ -444,3 +445,65 @@ def test_fixture_agent_program_strategy_is_live_and_acts_on_tournament_decision(
     assert decision.winner_revision_id in action.reason
     assert decision.decision_sha256 in action.reason
     assert action.claim_ids == ()
+
+
+def test_public_cli_runs_fixture_tournament_through_campaign_runtime(
+    tmp_path: Path,
+) -> None:
+    parent = _revision(
+        tmp_path / "parent", revision_id="program-r1", parent_revision_id=None, score=1
+    )
+    candidate = _revision(
+        tmp_path / "candidate",
+        revision_id="program-r2",
+        parent_revision_id="program-r1",
+        score=3,
+    )
+    config = {
+        "schema_version": 1,
+        "campaign_id": "agent-program-campaign-1",
+        "tournament_id": "tournament-1",
+        "execution_profile": "fixture",
+        "program_id": "repair-agent",
+        "parent_revision_root": str(parent.root),
+        "candidate_revision_roots": [str(candidate.root)],
+        "generation_config": {"temperature": 0, "seed": 7},
+        "task": {
+            "task_id": "fixture-task",
+            "revision_id": "fixture-task-r1",
+            "project": "fixture-project",
+            "cohort": "feedback",
+            "source_sha256": "a" * 64,
+            "evaluator_id": "fixture-agent-program-native-v1",
+        },
+    }
+    config_path = tmp_path / "agent-program.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    output = tmp_path / "run"
+    argv = [
+        "campaign",
+        "run",
+        "--strategy",
+        "agent-program",
+        "--config",
+        str(config_path),
+        "--output",
+        str(output),
+    ]
+
+    assert main(argv) == 0
+    result = json.loads((output / "CAMPAIGN-RESULT.json").read_text())
+    assert result["status"] == "completed"
+    assert result["execution_scope"] == "fixture"
+    assert result["selected_parent_revision_id"] == "program-r2"
+    assert result["search_parent_advanced"] is True
+    assert result["claims"] == []
+    assert result["native_gain_claimed"] is False
+    assert result["promotion_eligible"] is False
+    assert result["capability_active"] is False
+    first_receipts = (output / "receipt-store/receipts.jsonl").read_bytes()
+    first_parent_log = (output / "SEARCH-PARENT.jsonl").read_bytes()
+
+    assert main(argv) == 0
+    assert (output / "receipt-store/receipts.jsonl").read_bytes() == first_receipts
+    assert (output / "SEARCH-PARENT.jsonl").read_bytes() == first_parent_log

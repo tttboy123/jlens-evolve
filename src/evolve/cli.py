@@ -11,7 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from evolve.alignment import align_native_pair
-from evolve.campaigns import run_legacy_import_campaign
+from evolve.campaigns import (
+    run_agent_program_fixture_campaign,
+    run_legacy_import_campaign,
+)
 from evolve.contracts import (
     Claim,
     Cohort,
@@ -286,16 +289,11 @@ def main(argv: list[str] | None = None) -> int:
             print(canonical_json(result))
             return 0
         if args.campaign_action == "run" and args.strategy == "agent-program":
-            print(
-                canonical_json(
-                    {
-                        "strategy": "agent-program",
-                        "status": "not-yet-live",
-                        "reason": "AgentProgram tournament has no live authority adapter",
-                    }
-                )
+            result = run_agent_program_fixture_campaign(
+                config_path=args.config.resolve(), output_root=args.output.resolve()
             )
-            return 2
+            print(canonical_json(result))
+            return 0
         report = run_legacy_import_campaign(
             config_path=args.config.resolve(), output_root=args.output.resolve()
         )

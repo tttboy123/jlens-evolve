@@ -65,6 +65,12 @@ class ExecutionRuntime:
         self._receipt_sink = receipt_sink
         self._clock = clock or (lambda: datetime.now(UTC))
 
+    @property
+    def remote(self) -> bool:
+        """Expose transport locality to the Campaign budget authority."""
+
+        return self._model_transport.remote
+
     def execute(
         self,
         plan: ExecutionPlan,

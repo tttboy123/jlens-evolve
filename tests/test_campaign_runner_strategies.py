@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from evolve.campaigns import CampaignRunner, CampaignRunStatus, CampaignSpec
 from evolve.cli import main
 from evolve.contracts import (
     Authorization,
     Cohort,
+    ContractViolation,
     ExecutionLimits,
     ModelIdentity,
     Receipt,
@@ -134,25 +137,25 @@ def test_campaign_runner_reports_non_live_strategies_without_dispatch_or_claims(
     assert result.decisions[0].status is StrategyStatus.COMPATIBILITY
 
 
-def test_public_campaign_cli_truthfully_marks_agent_program_not_yet_live(
-    tmp_path, capsys
+def test_public_campaign_cli_rejects_agent_program_without_fixture_authority(
+    tmp_path,
 ) -> None:
     config = tmp_path / "agent-program.json"
     config.write_text("{}", encoding="utf-8")
 
-    assert main(
-        [
-            "campaign",
-            "run",
-            "--strategy",
-            "agent-program",
-            "--config",
-            str(config),
-            "--output",
-            str(tmp_path / "run"),
-        ]
-    ) == 2
-    assert '"status":"not-yet-live"' in capsys.readouterr().out
+    with pytest.raises(ContractViolation, match="config fields"):
+        main(
+            [
+                "campaign",
+                "run",
+                "--strategy",
+                "agent-program",
+                "--config",
+                str(config),
+                "--output",
+                str(tmp_path / "run"),
+            ]
+        )
 
 
 def test_campaign_runner_marks_unwired_agent_tournament_not_yet_live() -> None:
