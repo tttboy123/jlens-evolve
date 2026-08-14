@@ -14,6 +14,7 @@ from evolve.autonomous import (
     EvolutionDependencies,
     PrescreenResult,
 )
+from evolve.autonomous.output import load_best_harness
 from evolve.autonomous.runner import RoundExecutionRequest
 from evolve.cli import main
 from evolve.contracts import (
@@ -498,6 +499,16 @@ def test_public_cli_runs_two_real_feedback_rounds_and_replays_without_calls(
         row["classification"] for row in second_failure["prior_claims"]
     ] == ["neutral", "neutral", "neutral"]
     assert (output / "best/BEST-HARNESS.json").is_file()
+    best = load_best_harness(
+        output / "best/BEST-HARNESS.json",
+        expected_model_identity_sha256=json.loads(
+            (output / "GOAL.json").read_text()
+        )["model_identity_sha256"],
+    )
+    assert best is not None
+    assert best.change_set.revision_id == json.loads(
+        (output / "EVOLUTION-RESULT.json").read_text()
+    )["best_candidate_revision_id"]
     assert (output / "EVIDENCE-MANIFEST.json").is_file()
     assert json.loads((output / "EVOLUTION-RESULT.json").read_text())["product_status"] == (
         "offline_e2e_verified"
@@ -556,7 +567,14 @@ def test_candidate_task_lineage_tamper_blocks_integrity_and_never_advances_best(
     result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
     assert result["status"] == "blocked_integrity"
     assert result["best_candidate_revision_id"] is None
-    assert not (output / "best/BEST-HARNESS.json").exists()
+    best_path = output / "best/BEST-HARNESS.json"
+    assert best_path.is_file()
+    assert load_best_harness(
+        best_path,
+        expected_model_identity_sha256=json.loads(
+            (output / "GOAL.json").read_text()
+        )["model_identity_sha256"],
+    ) is None
     assert (output / "rounds/round-0000/INTEGRITY-BLOCK.json").is_file()
 
 

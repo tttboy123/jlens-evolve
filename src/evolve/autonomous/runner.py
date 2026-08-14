@@ -27,6 +27,7 @@ from .goal import GoalRunStatus, GoalState, GoalStateStore
 from .output import (
     atomic_json,
     export_best_harness,
+    export_empty_harness,
     file_sha256,
     freeze_json,
     model_identity,
@@ -202,6 +203,12 @@ class AutonomousEvolutionRunner:
                 "no_weight_training": True,
             },
         )
+        best_path = self.output_root / "best/BEST-HARNESS.json"
+        if not best_path.is_file():
+            export_empty_harness(
+                output_root=self.output_root,
+                model_identity_sha256=identity_sha,
+            )
         state = self.state_store.load_or_create(goal_id=self.config.goal.goal_id)
         replay = self._rebuild_completed_rounds(state)
         state = replay.state
