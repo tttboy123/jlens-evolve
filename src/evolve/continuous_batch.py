@@ -123,8 +123,9 @@ FITNESS_COMPILE_REJECTED = 0
 FITNESS_DUPLICATE_REJECTED = 0
 FITNESS_QWEN_INVALID = 0
 
-#: SHA-256 literal pattern
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+#: SHA-256 literal pattern (40-char SHA-1 and 64-char SHA-256 are both
+#: accepted since the platform's `git rev-parse` returns SHA-1).
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +204,7 @@ class BatchConfig:
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise BatchConfigError(f"unsupported schema_version {self.schema_version}")
-        if _SHA256_RE.fullmatch(self.final_commit_sha or "") is None:
+        if _SHA_RE.fullmatch(self.final_commit_sha or "") is None:
             raise BatchConfigError("final_commit_sha must be a literal SHA-256")
         if self.cohort not in ALLOWED_COHORTS:
             raise BatchConfigError(f"cohort must be in {sorted(ALLOWED_COHORTS)}")
@@ -326,9 +327,9 @@ class TrialRecord:
             "event_sha256",
         ):
             value = getattr(self, name)
-            if value and _SHA256_RE.fullmatch(value) is None:
+            if value and _SHA_RE.fullmatch(value) is None:
                 raise BatchConfigError(f"{name} must be a literal SHA-256 or empty")
-        if self.previous_event_sha256 and _SHA256_RE.fullmatch(
+        if self.previous_event_sha256 and _SHA_RE.fullmatch(
             self.previous_event_sha256
         ) is None:
             raise BatchConfigError("previous_event_sha256 must be a literal SHA-256")
