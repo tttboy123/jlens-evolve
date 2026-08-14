@@ -1292,7 +1292,16 @@ class ContinuousRunner:
             and not template.exists()
         ):
             raise BatchSafety(f"fresh campaign template missing: {template}")
-        return self.fresh_feedback_runner(template, out)
+        # Rewrite the template's final_commit_sha to bind to the current
+        # worktree HEAD so fresh_feedback_e2e accepts the dispatch.
+        per_trial_config = out / "FRESH-FEEDBACK-CONFIG.json"
+        template_data = json.loads(template.read_text(encoding="utf-8"))
+        template_data["final_commit_sha"] = self.config.final_commit_sha
+        per_trial_config.write_text(
+            json.dumps(template_data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return self.fresh_feedback_runner(per_trial_config, out)
 
     def _classify_native_result(
         self, result: Mapping[str, Any]
