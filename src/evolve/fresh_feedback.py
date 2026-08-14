@@ -38,7 +38,6 @@ from evolve.live_campaign import LiveCampaignSpec, run_skill_paired_campaign
 from evolve.observers import (
     CostObserver,
     ExternalTraceObserver,
-    JacobianLensObserver,
     NativeOutcomeObserver,
     ObserverHub,
 )
@@ -409,6 +408,7 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         actual_model_calls=1,
     )
     teacher_budget = teacher_ledger.snapshot()
+    teacher_events = teacher_ledger.events()
     now = datetime.now(UTC)
     authorization = Authorization(
         authorization_id=f"auth-{campaign_id}",
@@ -441,7 +441,6 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
     observer_hub = ObserverHub(
         (
             ExternalTraceObserver(),
-            JacobianLensObserver(),
             NativeOutcomeObserver(),
             CostObserver(),
         ),
@@ -483,7 +482,6 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         tool_policy_id="deterministic-operator-span-v1",
         observer_policy_ids=(
             "external-trace-v1",
-            "jlens-v1",
             "native-v1",
             "cost-v1",
         ),
@@ -546,7 +544,10 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         receipt_store=receipt_store,
         observer_hub=observer_hub,
         claim_engine=ClaimEngine(graph),
-        evidence_grade_machine=EvidenceGradeMachine(graph),
+        evidence_grade_machine=EvidenceGradeMachine(
+            graph,
+            receipt_store=receipt_store,
+        ),
         governance_service=GovernanceService(),
         promotion_decision_log=promotion_log,
         candidate_registry=CandidateRegistry(
@@ -598,6 +599,10 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         {
             "schema_version": 1,
             "authority_path": "cost-ledger/events.jsonl",
+            "head_path": "cost-ledger/events.jsonl.head.json",
+            "event_count": len(teacher_events),
+            "head_event_sha256": teacher_events[-1]["event_sha256"],
+            "chain_verified_on_recovery": True,
             "budget_cny": teacher_budget.max_cost_cny,
             "reserved_cny": teacher_budget.reserved_cost_cny,
             "actual_spend_cny": teacher_budget.spent_cost_cny,

@@ -50,6 +50,12 @@ class ExternalTraceObserver(ReceiptObserver):
 
 
 class JacobianLensObserver(ReceiptObserver):
+    """Legacy/untrusted trace projection; never sufficient for E3.
+
+    This adapter intentionally preserves historical replay compatibility.  E3
+    uses ``TrustedJacobianLensObserver`` and a process-local trust verifier.
+    """
+
     def __init__(self) -> None:
         super().__init__("jlens-v1", ("jlens", "internal_trace"), ClaimGrade.E0)
 

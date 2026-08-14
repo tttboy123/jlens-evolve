@@ -27,17 +27,25 @@ identities; compiles a byte-frozen DeepSeek request/response into an immutable
 `CandidateChangeSet`, Skill, zero-argument Operator and Router; and dispatches
 baseline/taught generation and native evaluation only via `ExecutionRuntime`.
 Baseline never reads the compiled candidate, while taught must consume and hash
-it or fail closed. Matched native pairs produce E2 counterfactual claims. E3 is
-available only for cross-task native gains with aligned external/internal
-prediction evidence; missing evidence remains E2.
+it or fail closed. An E2 claim binds a frozen `MatchedCounterfactualPair`: both
+model receipts, external traces, native outcomes, the matched execution identity,
+and the taught Candidate revision/bundle. Native metadata alone remains E1. E3
+additionally requires independently signed `trusted-jlens-v1` observations whose
+artifact bytes and model subject reverify against a process-local trust root;
+an `observer_id`, renamed receipt, self-reported hash or model-provided
+`internal_trace` is never sufficient. Before E3 projection, every E2 pair is
+rebuilt from the Receipt Store and its literal receipt kinds/artifacts. Missing
+trusted evidence or receipt replay remains E2.
 
-Every legal outcome enters Candidate Registry. Neutral, regression and
-infrastructure failure never enter Capability Registry. Governance records an
-immutable decision, and only an approved E3 decision with explicit human approval
-can create an inactive Capability revision. Teacher cost authorization is an
-append-only ledger that survives restart and deduplicates replay. The command does
-not open holdout, retrain model weights, auto-activate Skills or mutate legacy
-data.
+Every legal outcome enters Candidate Registry. Governance projects neutral as
+`no_change`, regression as `rejected`, and evaluator infrastructure failure as
+`blocked`; only regression creates a Rejected Registry record. Only an approved
+E3 decision with explicit human approval can create an inactive Capability
+revision. Approved decisions are signed by the configured process-local
+Governance authority; the decision log re-verifies that signature before the
+Capability Registry will project it. Teacher cost authorization is an append-only sequence/hash chain with
+an atomic head anchor, restart recovery and replay deduplication. The command does
+not open holdout, retrain model weights, auto-activate Skills or mutate legacy data.
 
 Fresh configuration must bind the final Git SHA, exactly three feedback tasks,
 the frozen model/harness paths, and byte-frozen `teacher_request` and

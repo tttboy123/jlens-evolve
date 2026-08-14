@@ -20,14 +20,21 @@ SHA = "a" * 64
 
 
 def _claim(classification: ClaimClassification, grade: ClaimGrade) -> Claim:
+    lineage_required = grade in {ClaimGrade.E2, ClaimGrade.E3}
     return Claim(
         claim_id=f"claim-{classification}-{grade}",
         candidate_id="candidate-1",
         grade=grade,
         classification=classification,
-        evidence_ids=("evidence-1",),
+        evidence_ids=("evidence-1", "evidence-2", "evidence-3", "evidence-4"),
         rationale="native matched evidence",
         supersedes_claim_id=None,
+        counterfactual_pair_sha256=("b" * 64 if lineage_required else None),
+        counterfactual_receipt_ids=(
+            tuple(f"receipt-{index}" for index in range(6))
+            if lineage_required
+            else ()
+        ),
     )
 
 
@@ -54,7 +61,7 @@ def test_only_governance_can_approve_inactive_candidate_and_requires_human() -> 
 @pytest.mark.parametrize(
     "classification,expected",
     [
-        (ClaimClassification.NEUTRAL, GateDecision.REJECTED),
+        (ClaimClassification.NEUTRAL, GateDecision.NO_CHANGE),
         (ClaimClassification.REGRESSION, GateDecision.REJECTED),
         (ClaimClassification.INFRA_FAILURE, GateDecision.BLOCKED),
     ],

@@ -8,7 +8,12 @@ import os
 from pathlib import Path
 from typing import Any, Generic, Protocol, TypeVar
 
-from evolve.contracts import ClaimGrade, canonical_json, content_sha256
+from evolve.contracts import (
+    ClaimGrade,
+    ContractViolation,
+    canonical_json,
+    content_sha256,
+)
 
 from .records import (
     AgentProgramRecord,
@@ -138,11 +143,14 @@ class CapabilityRegistry(_AppendOnlyRegistry[CapabilityRecord]):
             raise RegistryViolation(
                 "authoritative capability writes require promotion decision identity"
             )
-        decision = _decision_for(self._decision_log, record.promotion_decision_id)
+        decision = _approved_decision_for(
+            self._decision_log, record.promotion_decision_id
+        )
         if (
             str(decision.gate_decision) != "approved"
             or decision.evidence_grade is not ClaimGrade.E3
             or not decision.prediction_evidence_ids
+            or not decision.human_approval
             or decision.candidate_id != record.source_candidate_id
             or decision.candidate_revision_id != record.revision_id
             or set(decision.claim_ids) != set(record.evidence_claim_ids)
@@ -183,3 +191,23 @@ def _decision_for(reader: DecisionReader | None, decision_id: str) -> Any:
     if len(matches) != 1:
         raise RegistryViolation("promotion decision is missing or ambiguous")
     return matches[0]
+
+
+def _approved_decision_for(
+    reader: DecisionReader | None, decision_id: str
+) -> Any:
+    # Capability is a product authority projection, so a duck-typed reader is
+    # insufficient: it could simply return a hand-built APPROVED object.  The
+    # concrete log re-verifies the Governance HMAC before yielding a decision.
+    from evolve.governance.decisions import PromotionDecisionLog
+
+    if type(reader) is not PromotionDecisionLog:
+        raise RegistryViolation(
+            "capability registry requires authoritative promotion decision log"
+        )
+    try:
+        return reader.verified_approved(decision_id)
+    except ContractViolation as error:
+        raise RegistryViolation(
+            "capability promotion decision authority verification failed"
+        ) from error

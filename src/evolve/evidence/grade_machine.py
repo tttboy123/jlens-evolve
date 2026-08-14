@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Mapping, Protocol
 
 from evolve.contracts import (
     Claim,
@@ -16,7 +16,7 @@ from evolve.contracts import (
 )
 
 from .evidence_graph import EvidenceGraph
-from .receipt_store import IntegrityError
+from .receipt_store import IntegrityError, ReceiptStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,11 +47,25 @@ class CandidateEvidenceState:
         return self.regression_count
 
 
+class TrustedObserverVerifier(Protocol):
+    """Process-local trust root for independently produced observations."""
+
+    def verify_evidence(self, envelope: EvidenceEnvelope) -> bool: ...
+
+
 class EvidenceGradeMachine:
     """Rebuild E0/E1/E2/E3 from current, non-superseded native claims."""
 
-    def __init__(self, graph: EvidenceGraph) -> None:
+    def __init__(
+        self,
+        graph: EvidenceGraph,
+        *,
+        trusted_observer_verifier: TrustedObserverVerifier | None = None,
+        receipt_store: ReceiptStore | None = None,
+    ) -> None:
         self._graph = graph
+        self._trusted_observer_verifier = trusted_observer_verifier
+        self._receipt_store = receipt_store
 
     def aggregate(
         self,
@@ -131,6 +145,8 @@ class EvidenceGradeMachine:
                 tuple(evidence.values()),
                 task_revision_id=task_id,
                 mechanism_id=mechanism_id,
+                claim_evidence_ids=claims_by_task[task_id].evidence_ids,
+                trusted_observer_verifier=self._trusted_observer_verifier,
             )
             for task_id in claims_by_task
         }
@@ -148,6 +164,18 @@ class EvidenceGradeMachine:
         valid_native_claims = all(
             claim.grade >= ClaimGrade.E2 for claim in claims_by_task.values()
         )
+        counterfactual_lineage_rebuilt = False
+        if self._receipt_store is not None and valid_native_claims:
+            # E3 is a fresh projection, not a property that a stored Claim may
+            # self-assert.  Rebuild from the immutable Receipt Store so a
+            # forged pair digest, renamed receipt, or missing model artifact
+            # fails closed before trusted-observer evidence is considered.
+            EvidenceGraph.rebuild(
+                self._graph.root,
+                self._receipt_store,
+                allow_legacy_unbound_claims=False,
+            )
+            counterfactual_lineage_rebuilt = True
         e3_eligible = (
             isinstance(mechanism_id, str)
             and bool(mechanism_id.strip())
@@ -157,6 +185,7 @@ class EvidenceGradeMachine:
             and not counts[ClaimClassification.REGRESSION]
             and not has_infra
             and valid_native_claims
+            and counterfactual_lineage_rebuilt
             and prediction_consistent == task_count
         )
         if has_infra:
@@ -173,6 +202,7 @@ class EvidenceGradeMachine:
             f"neutral={counts[ClaimClassification.NEUTRAL]}, "
             f"regression={counts[ClaimClassification.REGRESSION]}, "
             f"infra={counts[ClaimClassification.INFRA_FAILURE]}, "
+            f"counterfactual_rebuilt={counterfactual_lineage_rebuilt}, "
             f"prediction_consistent={prediction_consistent}/{task_count}"
         )
         return CandidateEvidenceState(
@@ -215,13 +245,20 @@ def _task_prediction_evidence(
     *,
     task_revision_id: str,
     mechanism_id: str | None,
+    claim_evidence_ids: tuple[str, ...],
+    trusted_observer_verifier: TrustedObserverVerifier | None,
 ) -> tuple[str, ...]:
-    if not isinstance(mechanism_id, str) or not mechanism_id.strip():
+    if (
+        not isinstance(mechanism_id, str)
+        or not mechanism_id.strip()
+        or trusted_observer_verifier is None
+    ):
         return ()
     native_rows = [
         envelope
         for envelope in evidence
-        if getattr(envelope, "observer_id", None) == "native-v1"
+        if envelope.evidence_id in claim_evidence_ids
+        and getattr(envelope, "observer_id", None) == "native-v1"
         and envelope.payload.get("task_revision_id") == task_revision_id
         and _valid_sha256(envelope.payload.get("prediction_sha256"))
     ]
@@ -233,13 +270,16 @@ def _task_prediction_evidence(
     }
     if len(plan_ids) != 2:
         return ()
+    if {row.payload.get("arm") for row in native_rows} != {"baseline", "taught"}:
+        return ()
     evidence_ids: list[str] = []
     for plan_id in sorted(plan_ids):
         native = [row for row in native_rows if row.payload.get("plan_id") == plan_id]
         external = [
             envelope
             for envelope in evidence
-            if getattr(envelope, "observer_id", None) == "external-trace-v1"
+            if envelope.evidence_id in claim_evidence_ids
+            and getattr(envelope, "observer_id", None) == "external-trace-v1"
             and envelope.payload.get("task_revision_id") == task_revision_id
             and envelope.payload.get("plan_id") == plan_id
             and envelope.payload.get("mechanism_id") == mechanism_id
@@ -247,17 +287,22 @@ def _task_prediction_evidence(
         internal = [
             envelope
             for envelope in evidence
-            if getattr(envelope, "observer_id", None) == "jlens-v1"
+            if getattr(envelope, "observer_id", None) == "trusted-jlens-v1"
             and envelope.payload.get("task_revision_id") == task_revision_id
             and envelope.payload.get("plan_id") == plan_id
             and envelope.payload.get("mechanism_id") == mechanism_id
+            and trusted_observer_verifier.verify_evidence(envelope)
         ]
         if len(native) != 1 or len(external) != 1 or len(internal) != 1:
             return ()
         target = native[0].payload["prediction_sha256"]
+        subject = _model_subject(native[0])
+        if subject is None:
+            return ()
+        if any(_model_subject(row) != subject for row in (*external, *internal)):
+            return ()
         if any(
             row.payload.get("prediction_sha256") != target
-            or row.payload.get("observation_sha256") != target
             for row in (*external, *internal)
         ):
             return ()
@@ -269,3 +314,15 @@ def _task_prediction_evidence(
 
 def _valid_sha256(value: object) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+
+
+def _model_subject(envelope: EvidenceEnvelope) -> tuple[str, str] | None:
+    receipt_id = envelope.payload.get("model_receipt_id")
+    artifact_sha256 = envelope.payload.get("model_artifact_sha256")
+    if (
+        not isinstance(receipt_id, str)
+        or not receipt_id.strip()
+        or not _valid_sha256(artifact_sha256)
+    ):
+        return None
+    return receipt_id, artifact_sha256  # type: ignore[return-value]

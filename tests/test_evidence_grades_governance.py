@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,10 +13,24 @@ from evolve.contracts import (
     ClaimClassification,
     ClaimGrade,
     ContractViolation,
+    CounterfactualArmEvidence,
     EvidenceEnvelope,
+    MatchedCounterfactualPair,
+    Receipt,
 )
 from evolve.evidence import ClaimEngine, EvidenceGradeMachine, EvidenceGraph
-from evolve.governance import GateDecision, GovernanceService, PromotionDecisionLog
+from evolve.governance import (
+    GateDecision,
+    GovernanceDecisionAuthority,
+    GovernanceService,
+    PromotionDecisionLog,
+)
+from evolve.observers import (
+    TrustedJacobianLensObserver,
+    TrustedObserverIdentity,
+    TrustedObserverKeyring,
+    issue_trusted_observation_attestation,
+)
 from evolve.registry import (
     CandidateRecord,
     CapabilityRecord,
@@ -26,6 +41,19 @@ from evolve.registry import (
 )
 
 SHA = "a" * 64
+TRUST_SECRET = b"test-only-trusted-observer-secret"
+TRUST_IDENTITY = TrustedObserverIdentity(
+    key_id="jlens-key-2026-08",
+    implementation_id="jlens-runtime-v3",
+    implementation_sha256=hashlib.sha256(b"trusted jlens implementation").hexdigest(),
+)
+TRUST_KEYRING = TrustedObserverKeyring({TRUST_IDENTITY: TRUST_SECRET})
+
+
+def _grade_machine(graph: EvidenceGraph) -> EvidenceGradeMachine:
+    return EvidenceGradeMachine(
+        graph, trusted_observer_verifier=TRUST_KEYRING
+    )
 
 
 def _append_claim(
@@ -34,11 +62,25 @@ def _append_claim(
     candidate_id: str,
     task_revision_id: str,
     classification: ClaimClassification,
+    mechanism_id: str = "mechanism-v1",
+    external_matches_native: bool = True,
 ) -> Claim:
-    native_evidence = []
+    claim_evidence = []
+    counterfactual_receipts = []
+    arms: dict[str, CounterfactualArmEvidence] = {}
     for arm in ("baseline", "taught"):
         prediction = hashlib.sha256(
             f"{task_revision_id}:{arm}:prediction".encode()
+        ).hexdigest()
+        external_prediction = prediction
+        if not external_matches_native:
+            external_prediction = hashlib.sha256(
+                f"{task_revision_id}:{arm}:different-prediction".encode()
+            ).hexdigest()
+        plan_id = f"plan-{task_revision_id}-{arm}"
+        model_receipt_id = f"receipt-{task_revision_id}-{arm}-model"
+        model_artifact_sha256 = hashlib.sha256(
+            f"model:{task_revision_id}:{arm}".encode()
         ).hexdigest()
         evidence = EvidenceEnvelope(
             evidence_id=f"evidence-{task_revision_id}-{arm}-native",
@@ -47,28 +89,103 @@ def _append_claim(
             grade=ClaimGrade.E1,
             payload={
                 "task_revision_id": task_revision_id,
-                "plan_id": f"plan-{task_revision_id}-{arm}",
+                "plan_id": plan_id,
                 "arm": arm,
                 "prediction_sha256": prediction,
+                "model_receipt_id": model_receipt_id,
+                "model_artifact_sha256": model_artifact_sha256,
             },
             artifact_sha256=SHA,
         )
         graph.append_evidence(evidence)
-        native_evidence.append(evidence)
-    return graph.append_claim(
-        Claim(
-            claim_id=f"claim-{task_revision_id}",
-            candidate_id=candidate_id,
-            grade=(
-                ClaimGrade.E1
-                if classification is ClaimClassification.INFRA_FAILURE
-                else ClaimGrade.E2
-            ),
-            classification=classification,
-            evidence_ids=tuple(row.evidence_id for row in native_evidence),
-            rationale="matched native pair",
-            supersedes_claim_id=None,
+        external = EvidenceEnvelope(
+            evidence_id=f"evidence-{task_revision_id}-{arm}-external-trace-v1",
+            receipt_ids=(f"receipt-{task_revision_id}-{arm}-external-trace-v1",),
+            observer_id="external-trace-v1",
+            grade=ClaimGrade.E0,
+            payload={
+                "task_revision_id": task_revision_id,
+                "plan_id": plan_id,
+                "arm": arm,
+                "mechanism_id": mechanism_id,
+                "prediction_sha256": external_prediction,
+                "model_receipt_id": model_receipt_id,
+                "model_artifact_sha256": model_artifact_sha256,
+            },
+            artifact_sha256=SHA,
         )
+        graph.append_evidence(external)
+        claim_evidence.extend((external, evidence))
+        arms[arm] = CounterfactualArmEvidence(
+            arm=arm,
+            campaign_id="campaign-1",
+            plan_id=plan_id,
+            model_receipt_id=model_receipt_id,
+            model_receipt_sha256=hashlib.sha256(
+                f"model-receipt:{task_revision_id}:{arm}".encode()
+            ).hexdigest(),
+            model_artifact_sha256=model_artifact_sha256,
+            external_trace_evidence_id=external.evidence_id,
+            external_trace_evidence_sha256=external.content_sha256,
+            external_trace_receipt_id=external.receipt_ids[0],
+            external_trace_artifact_sha256=external.artifact_sha256,
+            native_outcome_evidence_id=evidence.evidence_id,
+            native_outcome_evidence_sha256=evidence.content_sha256,
+            native_outcome_receipt_id=evidence.receipt_ids[0],
+            native_outcome_artifact_sha256=evidence.artifact_sha256,
+            prediction_sha256=prediction,
+            candidate_consumed=arm == "taught",
+            candidate_revision_id="candidate-r1" if arm == "taught" else None,
+            candidate_bundle_sha256="b" * 64 if arm == "taught" else None,
+        )
+        counterfactual_receipts.extend(
+            (
+                model_receipt_id,
+                f"receipt-{task_revision_id}-{arm}-external-trace-v1",
+                evidence.receipt_ids[0],
+            )
+        )
+    pair = MatchedCounterfactualPair(
+        candidate_id=candidate_id,
+        candidate_revision_id="candidate-r1",
+        candidate_bundle_sha256="b" * 64,
+        campaign_id="campaign-1",
+        task_revision_id=task_revision_id,
+        task_source_sha256="c" * 64,
+        model_identity="local-mlx/qwen@frozen-r1",
+        native_evaluator_id="swebench@v1",
+        execution_config_sha256="d" * 64,
+        baseline=arms["baseline"],
+        taught=arms["taught"],
+    )
+    claim = Claim(
+        claim_id=f"claim-{task_revision_id}",
+        candidate_id=candidate_id,
+        grade=(
+            ClaimGrade.E1
+            if classification is ClaimClassification.INFRA_FAILURE
+            else ClaimGrade.E2
+        ),
+        classification=classification,
+        evidence_ids=tuple(row.evidence_id for row in claim_evidence),
+        rationale="matched native pair",
+        supersedes_claim_id=None,
+        counterfactual_pair_sha256=(
+            None
+            if classification is ClaimClassification.INFRA_FAILURE
+            else pair.content_sha256
+        ),
+        counterfactual_receipt_ids=(
+            ()
+            if classification is ClaimClassification.INFRA_FAILURE
+            else tuple(counterfactual_receipts)
+        ),
+    )
+    return graph.append_claim(
+        claim,
+        counterfactual_pair=(
+            None if classification is ClaimClassification.INFRA_FAILURE else pair
+        ),
     )
 
 
@@ -88,32 +205,85 @@ def _append_prediction_evidence(
             prediction = hashlib.sha256(
                 f"{task_revision_id}:{arm}:different-prediction".encode()
             ).hexdigest()
-        for observer_id in ("external-trace-v1", "jlens-v1"):
-            observation = prediction if consistent else "f" * 64
-            graph.append_evidence(
-                EvidenceEnvelope(
-                    evidence_id=(f"evidence-{task_revision_id}-{arm}-{observer_id}"),
-                    receipt_ids=(f"receipt-{task_revision_id}-{arm}-{observer_id}",),
-                    observer_id=observer_id,
-                    grade=ClaimGrade.E0,
-                    payload={
-                        "task_revision_id": task_revision_id,
-                        "plan_id": f"plan-{task_revision_id}-{arm}",
-                        "arm": arm,
-                        "mechanism_id": mechanism_id,
-                        "prediction_sha256": prediction,
-                        "observation_sha256": observation,
-                    },
-                    artifact_sha256=SHA,
-                )
+        plan_id = f"plan-{task_revision_id}-{arm}"
+        model_receipt_id = f"receipt-{task_revision_id}-{arm}-model"
+        model_artifact_sha256 = hashlib.sha256(
+            f"model:{task_revision_id}:{arm}".encode()
+        ).hexdigest()
+        external_receipt_id = (
+            f"receipt-{task_revision_id}-{arm}-external-trace-v1"
+        )
+        external = EvidenceEnvelope(
+                evidence_id=f"evidence-{task_revision_id}-{arm}-external-trace-v1",
+                receipt_ids=(external_receipt_id,),
+                observer_id="external-trace-v1",
+                grade=ClaimGrade.E0,
+                payload={
+                    "task_revision_id": task_revision_id,
+                    "plan_id": plan_id,
+                    "arm": arm,
+                    "mechanism_id": mechanism_id,
+                    "prediction_sha256": prediction,
+                    "model_receipt_id": model_receipt_id,
+                    "model_artifact_sha256": model_artifact_sha256,
+                },
+                artifact_sha256=SHA,
             )
+        existing = {row.evidence_id: row for row in graph.list_evidence()}.get(
+            external.evidence_id
+        )
+        if existing is None:
+            graph.append_evidence(external)
+        else:
+            assert existing == external
+        observed_prediction = prediction if consistent else "f" * 64
+        observation = json.dumps(
+            {
+                "mechanism_id": mechanism_id,
+                "prediction_sha256": observed_prediction,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        trusted_receipt_id = f"receipt-{task_revision_id}-{arm}-trusted-jlens"
+        attestation = issue_trusted_observation_attestation(
+            identity=TRUST_IDENTITY,
+            secret_key=TRUST_SECRET,
+            observation_artifact=observation,
+            observation_receipt_id=trusted_receipt_id,
+            plan_id=plan_id,
+            task_revision_id=task_revision_id,
+            model_receipt_id=model_receipt_id,
+            model_artifact_sha256=model_artifact_sha256,
+            observed_at="2026-08-14T06:00:00Z",
+            nonce=f"nonce-{plan_id}",
+        )
+        trusted = TrustedJacobianLensObserver(
+            keyring=TRUST_KEYRING,
+            artifact_reader=lambda digest, data=observation: (
+                data if digest == hashlib.sha256(data).hexdigest() else b"missing"
+            ),
+        ).observe(
+            Receipt(
+                receipt_id=trusted_receipt_id,
+                campaign_id="campaign-1",
+                plan_id=plan_id,
+                sequence=4,
+                kind="trusted_jlens_observation",
+                created_at="2026-08-14T06:00:00Z",
+                payload={"attestation": attestation},
+                artifact_sha256=hashlib.sha256(observation).hexdigest(),
+            )
+        )
+        assert trusted is not None
+        graph.append_evidence(trusted)
 
 
-def test_evidence_grade_machine_rebuilds_e0_through_cross_project_e3(
+def test_evidence_grade_machine_does_not_promote_unreplayed_claims_to_e3(
     tmp_path: Path,
 ) -> None:
     graph = EvidenceGraph(tmp_path / "graph")
-    machine = EvidenceGradeMachine(graph)
+    machine = _grade_machine(graph)
 
     empty = machine.aggregate("candidate-1", task_projects={})
     assert empty.grade is ClaimGrade.E0
@@ -124,6 +294,7 @@ def test_evidence_grade_machine_rebuilds_e0_through_cross_project_e3(
         candidate_id="candidate-1",
         task_revision_id="sphinx-7757",
         classification=ClaimClassification.GAIN,
+        mechanism_id="operator-boundary-v1",
     )
     one = machine.aggregate("candidate-1", task_projects={"sphinx-7757": "sphinx"})
     assert (one.grade, one.gain_count, one.task_count) == (ClaimGrade.E2, 1, 1)
@@ -133,6 +304,7 @@ def test_evidence_grade_machine_rebuilds_e0_through_cross_project_e3(
         candidate_id="candidate-1",
         task_revision_id="sphinx-10435",
         classification=ClaimClassification.NEUTRAL,
+        mechanism_id="operator-boundary-v1",
     )
     two = machine.aggregate(
         "candidate-1",
@@ -146,6 +318,7 @@ def test_evidence_grade_machine_rebuilds_e0_through_cross_project_e3(
         candidate_id="candidate-1",
         task_revision_id="django-13794",
         classification=ClaimClassification.GAIN,
+        mechanism_id="operator-boundary-v1",
     )
     without_predictions = machine.aggregate(
         "candidate-1",
@@ -174,7 +347,8 @@ def test_evidence_grade_machine_rebuilds_e0_through_cross_project_e3(
         },
         mechanism_id="operator-boundary-v1",
     )
-    assert three.grade is ClaimGrade.E3
+    assert three.grade is ClaimGrade.E2
+    assert three.e3_eligible is False
     assert three.classification == "gain"
     assert (three.task_count, three.project_count) == (3, 2)
     assert three.prediction_consistent_task_count == 3
@@ -222,7 +396,7 @@ def test_e3_rejects_neutral_regression_and_infra_counterexamples(
             task_revision_id=task_revision,
             mechanism_id="mechanism-v1",
         )
-    state = EvidenceGradeMachine(graph).aggregate(
+    state = _grade_machine(graph).aggregate(
         "candidate-1",
         task_projects={
             "sphinx-a": "sphinx",
@@ -252,7 +426,7 @@ def test_e3_rejects_external_or_internal_prediction_mismatch(tmp_path: Path) -> 
             mechanism_id="mechanism-v1",
             consistent=task_revision != "django-a",
         )
-    state = EvidenceGradeMachine(graph).aggregate(
+    state = _grade_machine(graph).aggregate(
         "candidate-1",
         task_projects={
             "sphinx-a": "sphinx",
@@ -276,6 +450,7 @@ def test_e3_rejects_native_prediction_mismatch(tmp_path: Path) -> None:
             candidate_id="candidate-1",
             task_revision_id=task_revision,
             classification=ClaimClassification.GAIN,
+            external_matches_native=task_revision != "django-a",
         )
         _append_prediction_evidence(
             graph,
@@ -283,7 +458,7 @@ def test_e3_rejects_native_prediction_mismatch(tmp_path: Path) -> None:
             mechanism_id="mechanism-v1",
             matches_native=task_revision != "django-a",
         )
-    state = EvidenceGradeMachine(graph).aggregate(
+    state = _grade_machine(graph).aggregate(
         "candidate-1",
         task_projects={
             "sphinx-a": "sphinx",
@@ -318,7 +493,7 @@ def _native_evidence(*, arm: str, resolved: bool, error: str | None = None):
     )
 
 
-def test_claim_engine_assigns_e2_only_to_valid_strict_native_pairs(
+def test_claim_engine_native_only_pair_cannot_mint_e2(
     tmp_path: Path,
 ) -> None:
     graph = EvidenceGraph(tmp_path / "graph")
@@ -339,9 +514,11 @@ def test_claim_engine_assigns_e2_only_to_valid_strict_native_pairs(
     )
 
     assert (valid.grade, valid.classification) == (
-        ClaimGrade.E2,
+        ClaimGrade.E1,
         ClaimClassification.GAIN,
     )
+    assert valid.counterfactual_pair_sha256 is None
+    assert valid.counterfactual_receipt_ids == ()
     assert (infra.grade, infra.classification) == (
         ClaimGrade.E1,
         ClaimClassification.INFRA_FAILURE,
@@ -358,13 +535,14 @@ def test_governance_decision_is_immutable_replay_safe_and_projects_asset_semanti
             candidate_id="candidate-1",
             task_revision_id=task_revision,
             classification=ClaimClassification.GAIN,
+            mechanism_id="operator-boundary-v1",
         )
         _append_prediction_evidence(
             graph,
             task_revision_id=task_revision,
             mechanism_id="operator-boundary-v1",
         )
-    state = EvidenceGradeMachine(graph).aggregate(
+    state = _grade_machine(graph).aggregate(
         "candidate-1",
         task_projects={
             "sphinx-7757": "sphinx",
@@ -373,6 +551,10 @@ def test_governance_decision_is_immutable_replay_safe_and_projects_asset_semanti
         },
         mechanism_id="operator-boundary-v1",
     )
+    # This test exercises Governance/Registry projection.  The independent
+    # ReceiptStore-backed positive E3 path is covered by
+    # test_trusted_observer_e3; treat its output as the upstream authority.
+    state = replace(state, grade=ClaimGrade.E3, e3_eligible=True)
     candidate = CandidateRecord(
         candidate_id="candidate-1",
         revision_id="candidate-r1",
@@ -380,8 +562,14 @@ def test_governance_decision_is_immutable_replay_safe_and_projects_asset_semanti
         source_claim_ids=state.claim_ids,
         artifact_sha256=hashlib.sha256(b"candidate").hexdigest(),
     )
-    log = PromotionDecisionLog(tmp_path / "promotion-decisions.jsonl")
-    service = GovernanceService()
+    authority = GovernanceDecisionAuthority(
+        key_id="governance-test-key",
+        secret_key=b"g" * 32,
+    )
+    log = PromotionDecisionLog(
+        tmp_path / "promotion-decisions.jsonl", authority=authority
+    )
+    service = GovernanceService(authority=authority)
 
     decision = service.decide(
         candidate=candidate,

@@ -60,6 +60,14 @@ def _jsonable(value: Any) -> Any:
             field.name: _jsonable(getattr(value, field.name))
             for field in dataclasses.fields(value)
             if field.name != "content_sha256"
+            and not (
+                field.metadata.get("omit_if_none")
+                and getattr(value, field.name) is None
+            )
+            and not (
+                field.metadata.get("omit_if_empty")
+                and not getattr(value, field.name)
+            )
         }
     if isinstance(value, StrEnum):
         return str(value)
@@ -270,6 +278,146 @@ class EvidenceEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class CounterfactualArmEvidence:
+    """Immutable references proving one arm from model output to native outcome."""
+
+    arm: str
+    campaign_id: str
+    plan_id: str
+    model_receipt_id: str
+    model_receipt_sha256: str
+    model_artifact_sha256: str
+    external_trace_evidence_id: str
+    external_trace_evidence_sha256: str
+    external_trace_receipt_id: str
+    external_trace_artifact_sha256: str
+    native_outcome_evidence_id: str
+    native_outcome_evidence_sha256: str
+    native_outcome_receipt_id: str
+    native_outcome_artifact_sha256: str
+    prediction_sha256: str
+    candidate_consumed: bool
+    candidate_revision_id: str | None
+    candidate_bundle_sha256: str | None
+
+    def __post_init__(self) -> None:
+        if self.arm not in {"baseline", "taught"}:
+            raise ContractViolation("counterfactual arm must be baseline or taught")
+        for name in (
+            "campaign_id",
+            "plan_id",
+            "model_receipt_id",
+            "external_trace_evidence_id",
+            "external_trace_receipt_id",
+            "native_outcome_evidence_id",
+            "native_outcome_receipt_id",
+        ):
+            _require_text(name, getattr(self, name))
+        for name in (
+            "model_receipt_sha256",
+            "model_artifact_sha256",
+            "external_trace_evidence_sha256",
+            "external_trace_artifact_sha256",
+            "native_outcome_evidence_sha256",
+            "native_outcome_artifact_sha256",
+            "prediction_sha256",
+        ):
+            _require_sha256(name, getattr(self, name))
+        if self.arm == "baseline":
+            if (
+                self.candidate_consumed
+                or self.candidate_revision_id is not None
+                or self.candidate_bundle_sha256 is not None
+            ):
+                raise ContractViolation("baseline arm contains candidate lineage")
+        else:
+            if not self.candidate_consumed:
+                raise ContractViolation("taught arm did not consume candidate")
+            _require_text("candidate_revision_id", self.candidate_revision_id or "")
+            _require_sha256(
+                "candidate_bundle_sha256", self.candidate_bundle_sha256 or ""
+            )
+
+    @property
+    def content_sha256(self) -> str:
+        return content_sha256(self)
+
+
+@dataclass(frozen=True, slots=True)
+class MatchedCounterfactualPair:
+    """Complete baseline/taught lineage for one causal native comparison."""
+
+    candidate_id: str
+    candidate_revision_id: str
+    candidate_bundle_sha256: str
+    campaign_id: str
+    task_revision_id: str
+    task_source_sha256: str
+    model_identity: str
+    native_evaluator_id: str
+    execution_config_sha256: str
+    baseline: CounterfactualArmEvidence
+    taught: CounterfactualArmEvidence
+
+    def __post_init__(self) -> None:
+        for name in (
+            "candidate_id",
+            "candidate_revision_id",
+            "campaign_id",
+            "task_revision_id",
+            "model_identity",
+            "native_evaluator_id",
+        ):
+            _require_text(name, getattr(self, name))
+        for name in (
+            "candidate_bundle_sha256",
+            "task_source_sha256",
+            "execution_config_sha256",
+        ):
+            _require_sha256(name, getattr(self, name))
+        if self.baseline.arm != "baseline" or self.taught.arm != "taught":
+            raise ContractViolation("counterfactual pair arm ordering is invalid")
+        if self.baseline.campaign_id != self.campaign_id:
+            raise ContractViolation("baseline campaign identity does not match pair")
+        if self.taught.campaign_id != self.campaign_id:
+            raise ContractViolation("taught campaign identity does not match pair")
+        if self.taught.candidate_revision_id != self.candidate_revision_id:
+            raise ContractViolation("taught candidate revision does not match pair")
+        if self.taught.candidate_bundle_sha256 != self.candidate_bundle_sha256:
+            raise ContractViolation("taught candidate bundle does not match pair")
+        if self.baseline.plan_id == self.taught.plan_id:
+            raise ContractViolation("counterfactual arms must be separate executions")
+        if len(set(self.evidence_ids)) != 4 or len(set(self.receipt_ids)) != 6:
+            raise ContractViolation(
+                "counterfactual pair contains duplicate evidence or receipts"
+            )
+
+    @property
+    def evidence_ids(self) -> tuple[str, ...]:
+        return (
+            self.baseline.external_trace_evidence_id,
+            self.baseline.native_outcome_evidence_id,
+            self.taught.external_trace_evidence_id,
+            self.taught.native_outcome_evidence_id,
+        )
+
+    @property
+    def receipt_ids(self) -> tuple[str, ...]:
+        return (
+            self.baseline.model_receipt_id,
+            self.baseline.external_trace_receipt_id,
+            self.baseline.native_outcome_receipt_id,
+            self.taught.model_receipt_id,
+            self.taught.external_trace_receipt_id,
+            self.taught.native_outcome_receipt_id,
+        )
+
+    @property
+    def content_sha256(self) -> str:
+        return content_sha256(self)
+
+
+@dataclass(frozen=True, slots=True)
 class Claim:
     claim_id: str
     candidate_id: str
@@ -278,13 +426,39 @@ class Claim:
     evidence_ids: tuple[str, ...]
     rationale: str
     supersedes_claim_id: str | None
+    counterfactual_pair_sha256: str | None = dataclasses.field(
+        default=None, metadata={"omit_if_none": True}
+    )
+    counterfactual_receipt_ids: tuple[str, ...] = dataclasses.field(
+        default=(), metadata={"omit_if_empty": True}
+    )
+    _legacy_read: dataclasses.InitVar[bool] = False
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _legacy_read: bool) -> None:
         _require_text("claim_id", self.claim_id)
         _require_text("candidate_id", self.candidate_id)
         _require_text("rationale", self.rationale)
         if not self.evidence_ids:
             raise ContractViolation("claim must reference evidence")
+        if self.counterfactual_pair_sha256 is not None:
+            _require_sha256(
+                "counterfactual_pair_sha256", self.counterfactual_pair_sha256
+            )
+        if self.counterfactual_receipt_ids:
+            for receipt_id in self.counterfactual_receipt_ids:
+                _require_text("counterfactual receipt id", receipt_id)
+        if self.grade in {ClaimGrade.E2, ClaimGrade.E3}:
+            if self.counterfactual_pair_sha256 is None:
+                if not _legacy_read:
+                    raise ContractViolation(
+                        "E2/E3 claim requires complete counterfactual lineage"
+                    )
+            elif len(self.evidence_ids) != 4 or len(
+                self.counterfactual_receipt_ids
+            ) != 6:
+                raise ContractViolation(
+                    "E2/E3 claim requires all counterfactual evidence and receipts"
+                )
 
     @property
     def content_sha256(self) -> str:

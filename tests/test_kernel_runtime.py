@@ -326,6 +326,9 @@ def test_execution_runtime_is_the_single_entry_and_replays_finalized_receipts() 
     assert native.payload["native_evaluator_id"] == "native@" + SHA
     assert native.payload["execution_config_sha256"]
     assert native.payload["evaluator_error"] is None
+    model = next(item for item in first.receipts if item.kind == "model")
+    assert native.payload["model_receipt_id"] == model.receipt_id
+    assert native.payload["model_artifact_sha256"] == model.artifact_sha256
 
 
 def test_terminal_replay_rejects_a_different_plan_with_the_same_id() -> None:
@@ -380,6 +383,12 @@ def test_execution_runtime_records_infrastructure_error_without_claiming_result(
     assert result.receipts[-2].payload["resolved"] is False
     assert result.receipts[-2].payload["evaluator_error"] == (
         "EvaluatorInfrastructureError: native harness did not start"
+    )
+    model = next(item for item in result.receipts if item.kind == "model")
+    assert result.receipts[-2].payload["model_receipt_id"] == model.receipt_id
+    assert (
+        result.receipts[-2].payload["model_artifact_sha256"]
+        == model.artifact_sha256
     )
     assert result.receipts[-1].payload["status"] == "infra_failure"
 

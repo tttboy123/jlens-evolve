@@ -13,7 +13,12 @@ from evolve.contracts import (
     ModelIdentity,
     TaskRevision,
 )
-from evolve.governance import GateDecision, PromotionDecision, PromotionDecisionLog
+from evolve.governance import (
+    GateDecision,
+    GovernanceDecisionAuthority,
+    PromotionDecision,
+    PromotionDecisionLog,
+)
 from evolve.registry import (
     AgentProgramRecord,
     AgentProgramRegistry,
@@ -305,7 +310,12 @@ def test_candidate_registry_is_append_only_idempotent_and_inactive(tmp_path) -> 
 def test_capability_and_agent_program_registries_are_revision_append_only(
     tmp_path,
 ) -> None:
-    decision_log = PromotionDecisionLog(tmp_path / "promotion-decisions.jsonl")
+    authority = GovernanceDecisionAuthority(
+        key_id="governance-test-key", secret_key=b"g" * 32
+    )
+    decision_log = PromotionDecisionLog(
+        tmp_path / "promotion-decisions.jsonl", authority=authority
+    )
     decision = PromotionDecision(
         decision_id="decision-e3-approved-1",
         candidate_id="candidate-symbol-rewrite",
@@ -320,7 +330,10 @@ def test_capability_and_agent_program_registries_are_revision_append_only(
         human_approval=True,
         decided_at="2026-08-14T04:00:00Z",
         rationale="approved E3 capability",
+        evidence_state_sha256="b" * 64,
+        authority_key_id=authority.key_id,
     )
+    decision = authority.sign(decision)
     decision_log.append(decision)
     capability_registry = CapabilityRegistry(
         tmp_path / "capabilities.jsonl", decision_log=decision_log

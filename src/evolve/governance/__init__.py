@@ -5,13 +5,20 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Iterable
 
-from evolve.contracts import Claim, ClaimClassification, ClaimGrade, ContractViolation
+from evolve.contracts import (
+    Claim,
+    ClaimClassification,
+    ClaimGrade,
+    ContractViolation,
+    content_sha256,
+)
 from evolve.evidence import CandidateEvidenceState
 from evolve.registry import CandidateRecord, CapabilityRecord, RejectedRecord
 
 from .decisions import (
     DecisionLogBusy,
     DecisionLogError,
+    GovernanceDecisionAuthority,
     PromotionDecision,
     PromotionDecisionLog,
     decision_identity,
@@ -21,6 +28,7 @@ from .decisions import (
 class GateDecision(StrEnum):
     APPROVED = "approved"
     HUMAN_APPROVAL_REQUIRED = "human_approval_required"
+    NO_CHANGE = "no_change"
     REJECTED = "rejected"
     BLOCKED = "blocked"
 
@@ -32,6 +40,11 @@ class GovernanceService:
     separate, explicitly authorized product operation and is not exposed by the
     registries' ordinary candidate-writing interface.
     """
+
+    def __init__(
+        self, *, authority: GovernanceDecisionAuthority | None = None
+    ) -> None:
+        self._authority = authority
 
     def evaluate(
         self,
@@ -51,16 +64,19 @@ class GovernanceService:
             raise ContractViolation("claims must match the candidate")
         if any(row.classification is ClaimClassification.INFRA_FAILURE for row in rows):
             return GateDecision.BLOCKED
-        if any(
-            row.classification
-            in {ClaimClassification.REGRESSION, ClaimClassification.NEUTRAL}
-            for row in rows
-        ):
+        if any(row.classification is ClaimClassification.REGRESSION for row in rows):
             return GateDecision.REJECTED
+        if any(row.classification is ClaimClassification.NEUTRAL for row in rows):
+            return GateDecision.NO_CHANGE
         if not all(row.classification is ClaimClassification.GAIN for row in rows):
             return GateDecision.REJECTED
-        highest_grade = max(
-            max(row.grade for row in rows), evidence_grade or ClaimGrade.E0
+        # When an aggregate projection is supplied it is authoritative.  A
+        # self-reported E3 Claim may not override an E2 aggregate that failed
+        # ReceiptStore/trusted-observer replay.
+        highest_grade = (
+            evidence_grade
+            if evidence_grade is not None
+            else max(row.grade for row in rows)
         )
         if not human_approval or highest_grade < ClaimGrade.E3:
             return GateDecision.HUMAN_APPROVAL_REQUIRED
@@ -103,6 +119,10 @@ class GovernanceService:
             "human_approval": human_approval,
             "decided_at": decided_at,
             "rationale": rationale,
+            "evidence_state_sha256": content_sha256(evidence),
+            "authority_key_id": (
+                self._authority.key_id if self._authority is not None else None
+            ),
         }
         decision = PromotionDecision(
             decision_id=decision_identity(identity_payload),
@@ -115,7 +135,15 @@ class GovernanceService:
             human_approval=human_approval,
             decided_at=decided_at,
             rationale=rationale,
+            evidence_state_sha256=identity_payload["evidence_state_sha256"],
+            authority_key_id=identity_payload["authority_key_id"],
         )
+        if gate is GateDecision.APPROVED:
+            if self._authority is None:
+                raise ContractViolation(
+                    "approved decisions require configured governance authority"
+                )
+            decision = self._authority.sign(decision)
         log.append(decision)
         return decision
 
@@ -203,6 +231,7 @@ __all__ = [
     "DecisionLogBusy",
     "DecisionLogError",
     "GateDecision",
+    "GovernanceDecisionAuthority",
     "GovernanceService",
     "PromotionDecision",
     "PromotionDecisionLog",

@@ -116,6 +116,7 @@ class ExecutionRuntime:
         existing_by_kind = {receipt.kind: receipt for receipt in existing}
         workspace: Mapping[str, Any]
         model_output: Mapping[str, Any]
+        model_receipt: Receipt | None = existing_by_kind.get("model")
 
         try:
             workspace_receipt = existing_by_kind.get("workspace")
@@ -127,7 +128,6 @@ class ExecutionRuntime:
                 raise ContractViolation("resume plan does not match workspace receipt")
             workspace = workspace_receipt.payload
 
-            model_receipt = existing_by_kind.get("model")
             if model_receipt is None:
                 model_payload = dict(self._model_transport.infer(plan, workspace))
                 model_payload.update(
@@ -275,6 +275,12 @@ class ExecutionRuntime:
                         )
                     native_payload["prediction_sha256"] = native_prediction
                 native_payload.update(_native_identity(plan))
+                native_payload.update(
+                    {
+                        "model_receipt_id": model_receipt.receipt_id,
+                        "model_artifact_sha256": model_receipt.artifact_sha256,
+                    }
+                )
                 native_payload["evaluator_error"] = None
                 appender.append_fact("native_evaluation", native_payload)
 
@@ -287,10 +293,16 @@ class ExecutionRuntime:
             )
             return appender.result("partial")
         except EvaluatorInfrastructureError as error:
+            if model_receipt is None:
+                raise ContractViolation(
+                    "evaluator infrastructure error occurred before model receipt"
+                ) from error
             appender.append_fact(
                 "native_evaluation",
                 {
                     **_native_identity(plan),
+                    "model_receipt_id": model_receipt.receipt_id,
+                    "model_artifact_sha256": model_receipt.artifact_sha256,
                     "resolved": False,
                     "evaluator_error": f"{type(error).__name__}: {error}",
                 },

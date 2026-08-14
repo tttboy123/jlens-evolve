@@ -8,6 +8,12 @@ from .observer_hub import (
     ObserverHub,
     SafetyObserver,
 )
+from .trusted_jlens import (
+    TrustedJacobianLensObserver,
+    TrustedObserverIdentity,
+    TrustedObserverKeyring,
+    issue_trusted_observation_attestation,
+)
 
 __all__ = [
     "CostObserver",
@@ -16,4 +22,8 @@ __all__ = [
     "NativeOutcomeObserver",
     "ObserverHub",
     "SafetyObserver",
+    "TrustedJacobianLensObserver",
+    "TrustedObserverIdentity",
+    "TrustedObserverKeyring",
+    "issue_trusted_observation_attestation",
 ]

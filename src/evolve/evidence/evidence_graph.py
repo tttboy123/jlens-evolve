@@ -13,10 +13,14 @@ from evolve.contracts import (
     Claim,
     ClaimClassification,
     ClaimGrade,
+    ContractViolation,
     EvidenceEnvelope,
+    MatchedCounterfactualPair,
+    Receipt,
     canonical_json,
 )
 
+from .counterfactual import build_matched_counterfactual_pair
 from .receipt_store import IntegrityError, ReceiptConflict, ReceiptStore
 
 _Record = TypeVar("_Record", EvidenceEnvelope, Claim)
@@ -25,8 +29,14 @@ _Record = TypeVar("_Record", EvidenceEnvelope, Claim)
 class EvidenceGraph:
     """Append-only facts plus a projection that is rebuilt on every open."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        allow_legacy_unbound_claims: bool = False,
+    ) -> None:
         self.root = Path(root)
+        self.allow_legacy_unbound_claims = allow_legacy_unbound_claims
         self.root.mkdir(parents=True, exist_ok=True)
         self.evidence_path = self.root / "evidence.jsonl"
         self.claims_path = self.root / "claims.jsonl"
@@ -41,8 +51,23 @@ class EvidenceGraph:
         )
         return envelope
 
-    def append_claim(self, claim: Claim) -> Claim:
+    def append_claim(
+        self,
+        claim: Claim,
+        *,
+        counterfactual_pair: MatchedCounterfactualPair | None = None,
+    ) -> Claim:
         existing = self.list_claims()
+        if claim.grade in {ClaimGrade.E2, ClaimGrade.E3}:
+            if counterfactual_pair is None:
+                raise IntegrityError(
+                    "new E2/E3 claim requires the complete counterfactual pair"
+                )
+            _validate_appended_counterfactual(
+                claim=claim,
+                pair=counterfactual_pair,
+                evidence_by_id={row.evidence_id: row for row in self.list_evidence()},
+            )
         if claim.supersedes_claim_id is not None:
             prior = next(
                 (
@@ -92,6 +117,16 @@ class EvidenceGraph:
                 evidence_ids=tuple(value["evidence_ids"]),
                 rationale=value["rationale"],
                 supersedes_claim_id=value["supersedes_claim_id"],
+                counterfactual_pair_sha256=value.get(
+                    "counterfactual_pair_sha256"
+                ),
+                counterfactual_receipt_ids=tuple(
+                    value.get("counterfactual_receipt_ids", ())
+                ),
+                _legacy_read=(
+                    self.allow_legacy_unbound_claims
+                    and "counterfactual_pair_sha256" not in value
+                ),
             ),
             id_of=lambda item: item.claim_id,
         )
@@ -135,8 +170,17 @@ class EvidenceGraph:
         )
 
     @classmethod
-    def rebuild(cls, root: str | Path, receipt_store: ReceiptStore) -> EvidenceGraph:
-        graph = cls(root)
+    def rebuild(
+        cls,
+        root: str | Path,
+        receipt_store: ReceiptStore,
+        *,
+        allow_legacy_unbound_claims: bool = False,
+    ) -> EvidenceGraph:
+        graph = cls(
+            root,
+            allow_legacy_unbound_claims=allow_legacy_unbound_claims,
+        )
         receipts = {item.receipt_id: item for item in receipt_store.list_receipts()}
         evidence = graph.list_evidence()
         evidence_ids = {item.evidence_id for item in evidence}
@@ -157,6 +201,7 @@ class EvidenceGraph:
             receipt_store.read_artifact(envelope.artifact_sha256)
         claims = graph.list_claims()
         claims_by_id = {claim.claim_id: claim for claim in claims}
+        evidence_by_id = {item.evidence_id: item for item in evidence}
         for claim in claims:
             missing = set(claim.evidence_ids) - evidence_ids
             if missing:
@@ -170,6 +215,12 @@ class EvidenceGraph:
                     raise IntegrityError(
                         f"claim {claim.claim_id} has invalid supersession target"
                     )
+            if claim.counterfactual_pair_sha256 is not None:
+                _rebuild_counterfactual_binding(
+                    claim=claim,
+                    evidence_by_id=evidence_by_id,
+                    receipts_by_id=receipts,
+                )
         return graph
 
     @staticmethod
@@ -235,3 +286,189 @@ class EvidenceGraph:
                 seen[identifier] = item
                 output.append(item)
         return tuple(output)
+
+
+def _rebuild_counterfactual_binding(
+    *,
+    claim: Claim,
+    evidence_by_id: dict[str, EvidenceEnvelope],
+    receipts_by_id: dict[str, Receipt],
+) -> None:
+    selected = tuple(evidence_by_id[row] for row in claim.evidence_ids)
+
+    def only(arm: str, observer_id: str) -> EvidenceEnvelope:
+        matches = tuple(
+            row
+            for row in selected
+            if row.observer_id == observer_id and row.payload.get("arm") == arm
+        )
+        if len(matches) != 1:
+            raise IntegrityError(
+                f"claim {claim.claim_id} has incomplete counterfactual evidence"
+            )
+        return matches[0]
+
+    baseline_external = only("baseline", "external-trace-v1")
+    baseline_native = only("baseline", "native-v1")
+    taught_external = only("taught", "external-trace-v1")
+    taught_native = only("taught", "native-v1")
+    try:
+        for arm, external, native in (
+            ("baseline", baseline_external, baseline_native),
+            ("taught", taught_external, taught_native),
+        ):
+            external_receipt = _only_typed_receipt(
+                claim=claim,
+                envelope=external,
+                receipts_by_id=receipts_by_id,
+                expected_kind="external_trace",
+                label=f"{arm} external",
+            )
+            native_receipt = _only_typed_receipt(
+                claim=claim,
+                envelope=native,
+                receipts_by_id=receipts_by_id,
+                expected_kind="native_evaluation",
+                label=f"{arm} native",
+            )
+            if external_receipt.plan_id != native_receipt.plan_id:
+                raise IntegrityError(
+                    f"claim {claim.claim_id} {arm} receipt plan mismatch"
+                )
+        baseline_model = receipts_by_id[
+            str(baseline_external.payload["model_receipt_id"])
+        ]
+        taught_model = receipts_by_id[str(taught_external.payload["model_receipt_id"])]
+        if baseline_model.kind != "model" or taught_model.kind != "model":
+            raise IntegrityError(
+                f"claim {claim.claim_id} model receipt kind mismatch"
+            )
+        candidate_revision_id = taught_model.payload["candidate_revision_id"]
+        candidate_bundle_sha256 = taught_model.payload["candidate_bundle_sha256"]
+        pair = build_matched_counterfactual_pair(
+            candidate_id=claim.candidate_id,
+            candidate_revision_id=candidate_revision_id,
+            candidate_bundle_sha256=candidate_bundle_sha256,
+            baseline_model_receipt=baseline_model,
+            baseline_external_evidence=baseline_external,
+            baseline_native_evidence=baseline_native,
+            taught_model_receipt=taught_model,
+            taught_external_evidence=taught_external,
+            taught_native_evidence=taught_native,
+        )
+    except (KeyError, TypeError, ContractViolation) as error:
+        raise IntegrityError(
+            f"claim {claim.claim_id} counterfactual lineage is invalid"
+        ) from error
+    if pair.evidence_ids != claim.evidence_ids:
+        raise IntegrityError(
+            f"claim {claim.claim_id} counterfactual evidence order mismatch"
+        )
+    if pair.receipt_ids != claim.counterfactual_receipt_ids:
+        raise IntegrityError(
+            f"claim {claim.claim_id} counterfactual receipt binding mismatch"
+        )
+    if pair.content_sha256 != claim.counterfactual_pair_sha256:
+        raise IntegrityError(
+            f"claim {claim.claim_id} counterfactual pair hash mismatch"
+        )
+    baseline_outcome = baseline_native.payload
+    taught_outcome = taught_native.payload
+    if any(
+        payload.get("evaluator_error") not in (None, "")
+        for payload in (baseline_outcome, taught_outcome)
+    ):
+        raise IntegrityError(
+            f"claim {claim.claim_id} binds infrastructure failure as E2"
+        )
+    baseline_resolved = baseline_outcome.get("resolved")
+    taught_resolved = taught_outcome.get("resolved")
+    if not isinstance(baseline_resolved, bool) or not isinstance(
+        taught_resolved, bool
+    ):
+        raise IntegrityError(
+            f"claim {claim.claim_id} has invalid native outcome types"
+        )
+    if not baseline_resolved and taught_resolved:
+        expected_classification = ClaimClassification.GAIN
+    elif baseline_resolved and not taught_resolved:
+        expected_classification = ClaimClassification.REGRESSION
+    else:
+        expected_classification = ClaimClassification.NEUTRAL
+    if claim.classification is not expected_classification:
+        raise IntegrityError(
+            f"claim {claim.claim_id} classification does not match native outcomes"
+        )
+
+
+def _validate_appended_counterfactual(
+    *,
+    claim: Claim,
+    pair: MatchedCounterfactualPair,
+    evidence_by_id: dict[str, EvidenceEnvelope],
+) -> None:
+    if (
+        pair.candidate_id != claim.candidate_id
+        or pair.content_sha256 != claim.counterfactual_pair_sha256
+        or pair.evidence_ids != claim.evidence_ids
+        or pair.receipt_ids != claim.counterfactual_receipt_ids
+    ):
+        raise IntegrityError("claim does not bind the supplied counterfactual pair")
+    expected = (
+        (
+            pair.baseline.external_trace_evidence_id,
+            pair.baseline.external_trace_evidence_sha256,
+        ),
+        (
+            pair.baseline.native_outcome_evidence_id,
+            pair.baseline.native_outcome_evidence_sha256,
+        ),
+        (
+            pair.taught.external_trace_evidence_id,
+            pair.taught.external_trace_evidence_sha256,
+        ),
+        (
+            pair.taught.native_outcome_evidence_id,
+            pair.taught.native_outcome_evidence_sha256,
+        ),
+    )
+    if any(
+        evidence_by_id.get(evidence_id) is None
+        or evidence_by_id[evidence_id].content_sha256 != evidence_sha256
+        for evidence_id, evidence_sha256 in expected
+    ):
+        raise IntegrityError("counterfactual pair evidence is not frozen in graph")
+
+
+def _only_typed_receipt(
+    *,
+    claim: Claim,
+    envelope: EvidenceEnvelope,
+    receipts_by_id: dict[str, Receipt],
+    expected_kind: str,
+    label: str,
+) -> Receipt:
+    if len(envelope.receipt_ids) != 1:
+        raise IntegrityError(
+            f"claim {claim.claim_id} {label} evidence must bind one receipt"
+        )
+    receipt_id = envelope.receipt_ids[0]
+    try:
+        receipt = receipts_by_id[receipt_id]
+    except KeyError as error:
+        raise IntegrityError(
+            f"claim {claim.claim_id} {label} receipt is missing"
+        ) from error
+    if receipt.kind != expected_kind:
+        raise IntegrityError(
+            f"claim {claim.claim_id} {label} receipt kind mismatch"
+        )
+    if receipt.artifact_sha256 != envelope.artifact_sha256:
+        raise IntegrityError(
+            f"claim {claim.claim_id} {label} artifact binding mismatch"
+        )
+    if receipt.plan_id != envelope.payload.get("plan_id"):
+        raise IntegrityError(
+            f"claim {claim.claim_id} {label} plan binding mismatch"
+        )
+    return receipt

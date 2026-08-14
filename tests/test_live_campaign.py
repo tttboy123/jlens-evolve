@@ -347,6 +347,9 @@ def test_runtime_backed_campaign_builds_six_plans_and_projects_auditable_assets(
         ClaimClassification.NEUTRAL,
         ClaimClassification.REGRESSION,
     ]
+    assert all(claim.counterfactual_pair_sha256 for claim in result.claims)
+    assert all(len(claim.counterfactual_receipt_ids) == 6 for claim in result.claims)
+    assert all(len(claim.evidence_ids) == 4 for claim in result.claims)
     assert len(dependencies["graph"].evidence_by_observer("native-v1")) == 6
     assert len(dependencies["graph"].evidence_by_observer("cost-v1")) == 6
     assert len(dependencies["graph"].evidence_by_observer("external-trace-v1")) == 6
@@ -430,7 +433,7 @@ def test_terminal_checkpoint_resume_replays_without_dispatch_or_duplicate_record
     assert second.snapshot == first.snapshot
 
 
-def test_runtime_receipts_reach_e3_without_manual_evidence_injection(
+def test_self_reported_internal_trace_cannot_reach_e3(
     tmp_path: Path,
 ) -> None:
     dependencies = _dependencies(tmp_path)
@@ -486,9 +489,9 @@ def test_runtime_receipts_reach_e3_without_manual_evidence_injection(
         clock=lambda: NOW,
     )
 
-    assert result.evidence_state.grade.value == "E3"
-    assert result.evidence_state.e3_eligible is True
-    assert result.evidence_state.prediction_consistent_task_count == 3
+    assert result.evidence_state.grade.value == "E2"
+    assert result.evidence_state.e3_eligible is False
+    assert result.evidence_state.prediction_consistent_task_count == 0
     assert len(graph.evidence_by_observer("external-trace-v1")) == 6
     assert len(graph.evidence_by_observer("jlens-v1")) == 6
     assert (
@@ -496,6 +499,30 @@ def test_runtime_receipts_reach_e3_without_manual_evidence_injection(
     )
     assert result.capability is None
     assert dependencies["capability_registry"].all() == ()
+
+
+def test_all_neutral_campaign_is_no_change_and_not_rejected(tmp_path: Path) -> None:
+    dependencies = _dependencies(tmp_path)
+
+    class NeutralEvaluator(FakeNativeEvaluator):
+        def evaluate(self, plan, workspace, model_output):
+            result = dict(super().evaluate(plan, workspace, model_output))
+            result["resolved"] = False
+            return result
+
+    dependencies["evaluator"] = NeutralEvaluator()
+    result = _run(tmp_path, dependencies, dependencies["controller"])
+
+    assert all(
+        claim.classification is ClaimClassification.NEUTRAL
+        for claim in result.claims
+    )
+    assert result.promotion_decision.gate_decision is GateDecision.NO_CHANGE
+    assert result.capability is None
+    assert result.rejected is None
+    assert dependencies["capability_registry"].all() == ()
+    assert dependencies["rejected_registry"].all() == ()
+    assert result.report["promotion_status"] == "no_change"
 
 
 def test_non_feedback_input_is_denied_before_campaign_or_adapter_mutation(

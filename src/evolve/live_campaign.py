@@ -24,6 +24,7 @@ from evolve.contracts import (
     ExecutionLimits,
     ExecutionPlan,
     ModelIdentity,
+    Receipt,
     TaskRevision,
 )
 from evolve.evidence import (
@@ -31,6 +32,7 @@ from evolve.evidence import (
     ClaimEngine,
     EvidenceGradeMachine,
     ReceiptStore,
+    build_matched_counterfactual_pair,
 )
 from evolve.governance import (
     GateDecision,
@@ -226,16 +228,46 @@ def run_skill_paired_campaign(
                 + ", ".join(sorted(statuses))
             )
 
-    claims = tuple(
-        claim_engine.classify_pair(
-            spec.candidate_id,
-            align_native_pair(
-                _native_evidence(baseline, receipt_store, observer_hub),
-                _native_evidence(taught, receipt_store, observer_hub),
-            ),
+    claim_rows: list[Claim] = []
+    for baseline, taught in plan_pairs:
+        baseline_native = _native_evidence(
+            baseline, receipt_store, observer_hub
         )
-        for baseline, taught in plan_pairs
-    )
+        taught_native = _native_evidence(taught, receipt_store, observer_hub)
+        native_pair = align_native_pair(baseline_native, taught_native)
+        evaluator_failed = any(
+            envelope.payload.get("evaluator_error") not in (None, "")
+            for envelope in (baseline_native, taught_native)
+        )
+        counterfactual_pair = None
+        if not evaluator_failed:
+            counterfactual_pair = build_matched_counterfactual_pair(
+                candidate_id=spec.candidate_id,
+                candidate_revision_id=spec.candidate_revision_id,
+                candidate_bundle_sha256=spec.candidate_artifact_sha256,
+                baseline_model_receipt=_only_plan_receipt(
+                    baseline, receipt_store, "model"
+                ),
+                baseline_external_evidence=_external_evidence(
+                    baseline, receipt_store, observer_hub
+                ),
+                baseline_native_evidence=baseline_native,
+                taught_model_receipt=_only_plan_receipt(
+                    taught, receipt_store, "model"
+                ),
+                taught_external_evidence=_external_evidence(
+                    taught, receipt_store, observer_hub
+                ),
+                taught_native_evidence=taught_native,
+            )
+        claim_rows.append(
+            claim_engine.classify_pair(
+                spec.candidate_id,
+                native_pair,
+                counterfactual_pair=counterfactual_pair,
+            )
+        )
+    claims = tuple(claim_rows)
     candidate = CandidateRecord(
         candidate_id=spec.candidate_id,
         revision_id=spec.candidate_revision_id,
@@ -489,6 +521,41 @@ def _native_evidence(
             f"plan {plan.plan_id} requires exactly one native-v1 observation"
         )
     return native_evidence[0]
+
+
+def _external_evidence(
+    plan: ExecutionPlan,
+    receipt_store: ReceiptStore,
+    observer_hub: ObserverHub,
+) -> EvidenceEnvelope:
+    receipt = _only_plan_receipt(plan, receipt_store, "external_trace")
+    evidence = tuple(
+        envelope
+        for envelope in observer_hub.observe(receipt)
+        if envelope.observer_id == "external-trace-v1"
+    )
+    if len(evidence) != 1:
+        raise ContractViolation(
+            f"plan {plan.plan_id} requires exactly one external-trace-v1 observation"
+        )
+    return evidence[0]
+
+
+def _only_plan_receipt(
+    plan: ExecutionPlan,
+    receipt_store: ReceiptStore,
+    kind: str,
+) -> Receipt:
+    receipts = tuple(
+        receipt
+        for receipt in receipt_store.receipts_for(plan.plan_id)
+        if receipt.kind == kind
+    )
+    if len(receipts) != 1:
+        raise ContractViolation(
+            f"plan {plan.plan_id} requires exactly one {kind} Runtime receipt"
+        )
+    return receipts[0]
 
 
 __all__ = [

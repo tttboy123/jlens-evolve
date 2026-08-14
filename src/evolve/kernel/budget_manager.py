@@ -117,6 +117,7 @@ class BudgetManager:
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_GENESIS_PREVIOUS_SHA256 = "0" * 64
 _DispatchResult = TypeVar("_DispatchResult")
 
 
@@ -137,6 +138,7 @@ class DurableCostLedger:
         _validate_calls(max_model_calls, "max_model_calls")
         self.path = Path(path)
         self.lease_path = self.path.with_suffix(self.path.suffix + ".writer.lock")
+        self.head_path = self.path.with_suffix(self.path.suffix + ".head.json")
         self.campaign_id = campaign_id
         self.max_cost_cny = float(max_cost_cny)
         self.max_model_calls = max_model_calls
@@ -243,19 +245,25 @@ class DurableCostLedger:
         return True, dispatch()
 
     def snapshot(self) -> BudgetSnapshot:
-        return self._snapshot(self._read_events())
+        return self._snapshot(self._read_events(recover_head=True))
 
     def events(self) -> tuple[dict[str, Any], ...]:
-        return self._read_events()
+        return self._read_events(recover_head=True)
 
     def _initialize(self) -> None:
         if self.path.exists():
-            self._validate_header(self._read_events())
+            self._validate_header(self._read_events(recover_head=True))
             return
+        if self.head_path.exists():
+            raise LedgerIntegrityError("cost ledger head exists without event log")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._writer_lease():
             if self.path.exists():
-                self._validate_header(self._read_events())
+                self._validate_header(
+                    self._read_events(
+                        recover_head=True, writer_lease_held=True
+                    )
+                )
                 return
             self._append_event(
                 {
@@ -264,7 +272,8 @@ class DurableCostLedger:
                     "campaign_id": self.campaign_id,
                     "max_cost_cny": self.max_cost_cny,
                     "max_model_calls": self.max_model_calls,
-                }
+                },
+                (),
             )
 
     def _append_mutation(
@@ -273,39 +282,52 @@ class DurableCostLedger:
         validate: Callable[[tuple[dict[str, Any], ...]], None],
     ) -> bool:
         with self._writer_lease():
-            events = self._read_events()
+            events = self._read_events(recover_head=True, writer_lease_held=True)
             self._validate_header(events)
             prior = next(
                 (item for item in events if item["event_id"] == event["event_id"]),
                 None,
             )
             if prior is not None:
-                if prior == event:
+                if _event_facts(prior) == event:
                     return False
                 raise LedgerConflict(
                     f"conflicting immutable ledger event {event['event_id']}"
                 )
             validate(events)
-            self._append_event(event)
+            self._append_event(event, events)
             return True
 
-    def _read_events(self) -> tuple[dict[str, Any], ...]:
+    def _read_events(
+        self,
+        *,
+        recover_head: bool = False,
+        writer_lease_held: bool = False,
+        validate_head: bool = True,
+    ) -> tuple[dict[str, Any], ...]:
         if not self.path.is_file():
             raise LedgerIntegrityError("durable cost ledger is missing")
         raw = self.path.read_bytes()
         if raw and not raw.endswith(b"\n"):
             raise LedgerIntegrityError("durable cost ledger has a partial final event")
-        events = []
+        events: list[dict[str, Any]] = []
         for line_number, line in enumerate(raw.decode("utf-8").splitlines(), 1):
             try:
-                payload = json.loads(line)
-                expected_sha256 = payload.pop("event_sha256")
+                stored = json.loads(line)
+                if not isinstance(stored, dict):
+                    raise TypeError("event must be an object")
+                expected_sha256 = stored.get("event_sha256")
+                payload = {
+                    key: value
+                    for key, value in stored.items()
+                    if key != "event_sha256"
+                }
             except (KeyError, TypeError, UnicodeError, json.JSONDecodeError) as error:
                 raise LedgerIntegrityError(
                     f"invalid cost ledger event at line {line_number}"
                 ) from error
             if (
-                not isinstance(payload, dict)
+                not isinstance(stored, dict)
                 or not isinstance(expected_sha256, str)
                 or _SHA256.fullmatch(expected_sha256) is None
                 or _event_sha256(payload) != expected_sha256
@@ -313,13 +335,34 @@ class DurableCostLedger:
                 raise LedgerIntegrityError(
                     f"cost ledger hash mismatch at line {line_number}"
                 )
-            self._validate_event(payload, line_number)
-            events.append(payload)
+            self._validate_event(stored, line_number)
+            expected_sequence = len(events)
+            expected_previous = (
+                _GENESIS_PREVIOUS_SHA256
+                if not events
+                else events[-1]["event_sha256"]
+            )
+            if stored.get("sequence") != expected_sequence:
+                raise LedgerIntegrityError(
+                    f"cost ledger sequence mismatch at line {line_number}"
+                )
+            if stored.get("previous_event_sha256") != expected_previous:
+                raise LedgerIntegrityError(
+                    f"cost ledger chain mismatch at line {line_number}"
+                )
+            events.append(stored)
         if not events:
             raise LedgerIntegrityError("durable cost ledger is empty")
         event_ids = [event["event_id"] for event in events]
         if len(event_ids) != len(set(event_ids)):
             raise LedgerIntegrityError("durable cost ledger has duplicate event ids")
+        self._validate_replay(tuple(events))
+        if validate_head:
+            self._validate_head(
+                tuple(events),
+                recover_head=recover_head,
+                writer_lease_held=writer_lease_held,
+            )
         return tuple(events)
 
     def _validate_header(self, events: tuple[dict[str, Any], ...]) -> None:
@@ -336,6 +379,11 @@ class DurableCostLedger:
     def _validate_event(self, event: dict[str, Any], line_number: int) -> None:
         try:
             _validate_event_id(event["event_id"], "event_id")
+            _validate_calls(event["sequence"], "sequence")
+            if _SHA256.fullmatch(event["previous_event_sha256"]) is None:
+                raise ContractViolation(
+                    "previous_event_sha256 must be a literal lowercase SHA-256"
+                )
             if event["campaign_id"] != self.campaign_id:
                 raise LedgerIntegrityError("cost ledger campaign identity mismatch")
             if event["kind"] == "opened":
@@ -350,10 +398,57 @@ class DurableCostLedger:
                 _validate_calls(event["actual_model_calls"], "actual model_calls")
             else:
                 raise LedgerIntegrityError("cost ledger event kind is invalid")
-        except (KeyError, ContractViolation) as error:
+        except (KeyError, TypeError, ContractViolation) as error:
             raise LedgerIntegrityError(
                 f"invalid cost ledger event at line {line_number}"
             ) from error
+
+    def _validate_replay(self, events: tuple[dict[str, Any], ...]) -> None:
+        """Replay domain invariants so a valid chain is also a valid budget history."""
+
+        self._validate_header(events)
+        reservations: dict[str, dict[str, Any]] = {}
+        charged_reservations: set[str] = set()
+        spent_cost = 0.0
+        spent_calls = 0
+        for line_number, event in enumerate(events[1:], 2):
+            if event["kind"] == "opened":
+                raise LedgerIntegrityError(
+                    f"duplicate cost ledger genesis at line {line_number}"
+                )
+            if event["kind"] == "reservation":
+                reservations[event["event_id"]] = event
+            elif event["kind"] == "charge":
+                reservation_id = event["reservation_id"]
+                if reservation_id not in reservations:
+                    raise LedgerIntegrityError(
+                        f"charge references unknown reservation at line {line_number}"
+                    )
+                if reservation_id in charged_reservations:
+                    raise LedgerIntegrityError(
+                        f"reservation has duplicate charge at line {line_number}"
+                    )
+                charged_reservations.add(reservation_id)
+                spent_cost += event["actual_cost_cny"]
+                spent_calls += event["actual_model_calls"]
+            reserved_cost = sum(
+                reservation["cost_cny"]
+                for reservation_id, reservation in reservations.items()
+                if reservation_id not in charged_reservations
+            )
+            reserved_calls = sum(
+                reservation["model_calls"]
+                for reservation_id, reservation in reservations.items()
+                if reservation_id not in charged_reservations
+            )
+            if spent_cost + reserved_cost > self.max_cost_cny:
+                raise LedgerIntegrityError(
+                    f"cost ledger exceeds authorization at line {line_number}"
+                )
+            if spent_calls + reserved_calls > self.max_model_calls:
+                raise LedgerIntegrityError(
+                    f"cost ledger model calls exceed authorization at line {line_number}"
+                )
 
     def _snapshot(self, events: tuple[dict[str, Any], ...]) -> BudgetSnapshot:
         self._validate_header(events)
@@ -375,8 +470,19 @@ class DurableCostLedger:
             spent_model_calls=sum(event["actual_model_calls"] for event in charges),
         )
 
-    def _append_event(self, event: dict[str, Any]) -> None:
-        stored = {**event, "event_sha256": _event_sha256(event)}
+    def _append_event(
+        self, event: dict[str, Any], events: tuple[dict[str, Any], ...]
+    ) -> None:
+        chained = {
+            **event,
+            "sequence": len(events),
+            "previous_event_sha256": (
+                events[-1]["event_sha256"]
+                if events
+                else _GENESIS_PREVIOUS_SHA256
+            ),
+        }
+        stored = {**chained, "event_sha256": _event_sha256(chained)}
         encoded = (canonical_json(stored) + "\n").encode()
         fd = os.open(self.path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o644)
         try:
@@ -386,6 +492,100 @@ class DurableCostLedger:
             os.fsync(fd)
         finally:
             os.close(fd)
+        self._write_head(stored)
+
+    def _write_head(self, event: dict[str, Any]) -> None:
+        payload = {
+            "schema_version": 1,
+            "campaign_id": self.campaign_id,
+            "event_count": event["sequence"] + 1,
+            "head_event_sha256": event["event_sha256"],
+        }
+        stored = {**payload, "anchor_sha256": _event_sha256(payload)}
+        encoded = (canonical_json(stored) + "\n").encode("utf-8")
+        temporary = self.head_path.with_name(
+            f"{self.head_path.name}.tmp.{os.getpid()}"
+        )
+        try:
+            fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            try:
+                offset = 0
+                while offset < len(encoded):
+                    offset += os.write(fd, encoded[offset:])
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(temporary, self.head_path)
+            directory_fd = os.open(self.head_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _validate_head(
+        self,
+        events: tuple[dict[str, Any], ...],
+        *,
+        recover_head: bool,
+        writer_lease_held: bool,
+    ) -> None:
+        if not self.head_path.is_file():
+            raise LedgerIntegrityError("durable cost ledger head is missing")
+        raw = self.head_path.read_bytes()
+        if not raw.endswith(b"\n"):
+            raise LedgerIntegrityError("durable cost ledger head is partial")
+        try:
+            stored = json.loads(raw.decode("utf-8"))
+            if not isinstance(stored, dict):
+                raise TypeError("head must be an object")
+            anchor_sha256 = stored.get("anchor_sha256")
+            payload = {
+                key: value for key, value in stored.items() if key != "anchor_sha256"
+            }
+        except (TypeError, UnicodeError, json.JSONDecodeError) as error:
+            raise LedgerIntegrityError("durable cost ledger head is invalid") from error
+        if (
+            not isinstance(stored, dict)
+            or not isinstance(anchor_sha256, str)
+            or _SHA256.fullmatch(anchor_sha256) is None
+            or _event_sha256(payload) != anchor_sha256
+        ):
+            raise LedgerIntegrityError("durable cost ledger head hash mismatch")
+        if (
+            payload.get("schema_version") != 1
+            or payload.get("campaign_id") != self.campaign_id
+        ):
+            raise LedgerIntegrityError("durable cost ledger head mismatch")
+        if (
+            payload.get("event_count") == len(events)
+            and payload.get("head_event_sha256") == events[-1]["event_sha256"]
+        ):
+            return
+        head_count = payload.get("event_count")
+        strict_one_event_prefix = (
+            isinstance(head_count, int)
+            and not isinstance(head_count, bool)
+            and head_count >= 1
+            and head_count + 1 == len(events)
+            and payload.get("head_event_sha256")
+            == events[head_count - 1]["event_sha256"]
+        )
+        if not recover_head or not strict_one_event_prefix:
+            raise LedgerIntegrityError("durable cost ledger head mismatch")
+        if writer_lease_held:
+            self._write_head(events[-1])
+            return
+        with self._writer_lease():
+            # Re-read under the single-writer lease: another process may have
+            # already recovered the head while this caller waited.
+            refreshed = self._read_events(validate_head=False)
+            self._validate_head(
+                refreshed,
+                recover_head=True,
+                writer_lease_held=True,
+            )
 
     @contextmanager
     def _writer_lease(self) -> Iterator[None]:
@@ -406,6 +606,16 @@ class DurableCostLedger:
 
 def _event_sha256(event: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(event).encode()).hexdigest()
+
+
+def _event_facts(event: dict[str, Any]) -> dict[str, Any]:
+    """Return the immutable business event without its storage-chain envelope."""
+
+    return {
+        key: value
+        for key, value in event.items()
+        if key not in {"sequence", "previous_event_sha256", "event_sha256"}
+    }
 
 
 def _validate_event_id(value: object, field: str) -> None:

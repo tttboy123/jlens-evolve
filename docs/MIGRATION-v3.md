@@ -13,7 +13,7 @@
 | Official SWE-bench invocation | `LegacyOfficialNativeEvaluator` behind `ExecutionRuntime` | live compatibility evaluator |
 | Mutable task checkout selection | `FrozenSourceWorkspaceManager` | replaced with clean, exact-revision admission |
 | Frozen taught Skill selection | `CandidateCompiler` + compiled Skill/Operator/Router | replaced; no live fallback |
-| In-memory Teacher `_spent_cny` | `DurableCostLedger` | replaced for new calls and replay |
+| In-memory Teacher `_spent_cny` | chained `DurableCostLedger` + head anchor | replaced for new calls and replay |
 | Direct Capability append | `GovernanceService` + `PromotionDecisionLog` | rejected by authoritative registry |
 
 ## One live authority path
@@ -30,10 +30,21 @@ matched pairs; registries accept only inactive revisions.
 The Teacher request and response are copied byte-for-byte into a self-contained
 compiled revision. The baseline branch does not read that revision; the taught
 branch revalidates every compiled artifact and consumes its Skill, Operator and
-Router. Strict native pairs become E2 claims. E3 additionally requires repeated
-cross-project gains and matching external/JLens prediction evidence. Candidate,
-Rejected and Capability registries are separate: only a decision-log-backed,
-human-approved E3 decision may create a Capability, still inactive by default.
+Router. Strict native pairs become E2 only after `MatchedCounterfactualPair`
+binds the Candidate revision/bundle and each arm's model receipt, external trace
+and native outcome. Old unbound E2 records require an explicit legacy-read flag
+and cannot be minted by the new Claim path. E3 additionally requires repeated
+cross-project gains and a cryptographically attested independent JLens
+observation bound to the same model receipt/artifact as external and native
+evidence. E3 projection first rebuilds every counterfactual pair from the
+Receipt Store and rejects missing, renamed, wrong-kind or artifact-drifted
+receipts. Generic legacy JLens traces remain readable but are never E3 eligible.
+Candidate, Rejected and Capability registries are separate: neutral remains
+`no_change`, infra remains `blocked`, regression is `rejected`, and only a
+decision-log-backed, human-approved E3 decision signed by the configured
+Governance authority may create a Capability, still inactive by default. The
+Capability Registry accepts only the concrete verifying decision log, not a
+duck-typed reader returning hand-built approvals.
 
 The CLI rejects non-feedback tasks, source revision drift, dirty checkouts,
 evaluator/model hash drift, a config not bound to the current Git commit, and
