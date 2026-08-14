@@ -501,6 +501,17 @@ def test_public_cli_runs_fixture_tournament_through_campaign_runtime(
     assert result["native_gain_claimed"] is False
     assert result["promotion_eligible"] is False
     assert result["capability_active"] is False
+    registry_rows = [
+        json.loads(line)
+        for line in (output / "registries/agent-programs.jsonl")
+        .read_text()
+        .splitlines()
+    ]
+    assert [row["revision_id"] for row in registry_rows] == [
+        "program-r1",
+        "program-r2",
+    ]
+    assert all(row["active"] is False for row in registry_rows)
     first_receipts = (output / "receipt-store/receipts.jsonl").read_bytes()
     first_parent_log = (output / "SEARCH-PARENT.jsonl").read_bytes()
 

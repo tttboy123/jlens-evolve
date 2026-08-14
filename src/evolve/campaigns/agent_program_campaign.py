@@ -33,6 +33,7 @@ from evolve.observers import (
     NativeOutcomeObserver,
     ObserverHub,
 )
+from evolve.registry import AgentProgramRecord, AgentProgramRegistry
 from evolve.reporting import AuditVerifier
 from evolve.runtime import ExecutionRuntime
 from evolve.strategies import AgentProgramSearchStrategy, StrategyContext
@@ -166,6 +167,20 @@ def run_agent_program_fixture_campaign(
         raise ContractViolation("AgentProgram campaign replay config drift")
     if not frozen_config.exists():
         _atomic_write(frozen_config, config_bytes)
+    program_registry = AgentProgramRegistry(
+        output_root / "registries/agent-programs.jsonl"
+    )
+    for revision in revisions:
+        program_registry.append(
+            AgentProgramRecord(
+                program_id=revision.program_id,
+                revision_id=revision.revision_id,
+                parent_revision_id=revision.parent_revision_id,
+                capability_revision_ids=revision.capability_revision_ids,
+                artifact_sha256=revision.bundle_sha256,
+                active=False,
+            )
+        )
 
     campaign_id = str(config["campaign_id"])
     authorization = Authorization(
