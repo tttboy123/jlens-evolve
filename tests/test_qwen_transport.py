@@ -85,6 +85,36 @@ class RecordingCellRunner:
         }
 
 
+class ExactCrlfCellRunner:
+    def run(self, plan, workspace, output_root: Path):
+        artifact_root = output_root / plan.plan_id
+        artifact_root.mkdir(parents=True)
+        prompt_bytes = b"SYSTEM: repair\r\nUSER: preserve exact bytes\r\n"
+        prompt_path = artifact_root / "prompt-000.txt"
+        prompt_path.write_bytes(prompt_bytes)
+        raw_bytes = b"fresh model output\n"
+        raw_path = artifact_root / "raw-output.txt"
+        raw_path.write_bytes(raw_bytes)
+        patch = "diff --git a/a.py b/a.py\n"
+        return {
+            "patch": patch,
+            "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+            "raw_output_path": str(raw_path),
+            "raw_output_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+            "prompt_paths": [str(prompt_path)],
+            "prompt_texts": [prompt_bytes.decode("utf-8")],
+            "prompt_sha256": [hashlib.sha256(prompt_bytes).hexdigest()],
+            "candidate_prompt": None,
+            "candidate_prompt_sha256": None,
+            "compiled_artifact_sha256": {},
+            "structural_valid": True,
+            "failure_reason": None,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost_cny": 0,
+        }
+
+
 def test_qwen_transport_dispatches_each_feedback_arm_through_cell_runner(
     tmp_path,
 ) -> None:
@@ -108,6 +138,24 @@ def test_qwen_transport_dispatches_each_feedback_arm_through_cell_runner(
         == "58796596d75205da0ff5f87d83bc169e9ec91b6f6a6c21cbd47af71bf79be2b0"
     )
     assert runner.calls == [("plan-baseline", "baseline", "feedback-sphinx-7757-v1")]
+
+
+def test_qwen_transport_validates_exact_crlf_prompt_bytes(tmp_path: Path) -> None:
+    transport = LegacyQwenPairTransport(
+        cell_runner=ExactCrlfCellRunner(), output_root=tmp_path
+    )
+
+    result = transport.infer(
+        _plan(),
+        {
+            "task_revision_id": "feedback-sphinx-7757-v1",
+            "checkout": "/tmp/source",
+        },
+    )
+
+    assert result["prompt_texts"] == [
+        "SYSTEM: repair\r\nUSER: preserve exact bytes\r\n"
+    ]
 
 
 def test_qwen_transport_fails_closed_on_task_or_arm_drift(tmp_path) -> None:

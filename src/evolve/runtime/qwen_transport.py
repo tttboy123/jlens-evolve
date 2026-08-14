@@ -110,7 +110,7 @@ class LegacyQwenPairTransport:
             if (
                 not isinstance(prompt_text, str)
                 or not prompt.is_file()
-                or prompt.read_text(encoding="utf-8") != prompt_text
+                or prompt.read_bytes().decode("utf-8") != prompt_text
                 or _sha256_file(prompt) != expected
             ):
                 raise ContractViolation("Qwen prompt identity mismatch")
