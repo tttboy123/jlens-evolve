@@ -200,12 +200,16 @@ def test_legacy_official_evaluator_freezes_patch_and_normalizes_receipts(
     assert result["resolved"] is True
     assert result["native_valid"] is True
     assert result["regressions"] == ["test_regression"]
-    assert result["native_report_sha256"] == hashlib.sha256(
-        Path(result["native_report_path"]).read_bytes()
-    ).hexdigest()
-    assert result["official_receipt_sha256"] == hashlib.sha256(
-        Path(result["official_receipt_path"]).read_bytes()
-    ).hexdigest()
+    assert (
+        result["native_report_sha256"]
+        == hashlib.sha256(Path(result["native_report_path"]).read_bytes()).hexdigest()
+    )
+    assert (
+        result["official_receipt_sha256"]
+        == hashlib.sha256(
+            Path(result["official_receipt_path"]).read_bytes()
+        ).hexdigest()
+    )
     invocation, materialized, receipt = observed[0]
     assert invocation.instance_id == "sphinx-doc__sphinx-7757"
     assert materialized["task_revision_id"] == plan.task.revision_id

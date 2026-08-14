@@ -8,6 +8,7 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from evolve.alignment import align_native_pair
 from evolve.contracts import (
@@ -21,7 +22,7 @@ from evolve.contracts import (
 from evolve.evidence import ClaimEngine, EvidenceGraph, ReceiptStore
 from evolve.fresh_feedback import run_fresh_feedback_e2e, seal_run
 from evolve.observers import NativeOutcomeObserver, ObserverHub
-from evolve.registry import CapabilityRecord, CapabilityRegistry
+from evolve.registry import CandidateRecord, CandidateRegistry
 from evolve.reporting import AuditVerifier, CampaignReportProjector
 
 
@@ -145,16 +146,15 @@ def run_legacy_feedback_e2e(
                 "classification": str(claim.classification),
             }
         )
-    capability = CapabilityRecord(
-        capability_id="capability-deterministic-operator",
+    candidate = CandidateRecord(
+        candidate_id="candidate-v3-teacher-001",
         revision_id="v3-candidate-001",
-        capability_kind="operator-skill",
-        evidence_claim_ids=tuple(claim.claim_id for claim in claims),
+        candidate_kind="legacy-import-operator-skill",
+        source_claim_ids=tuple(claim.claim_id for claim in claims),
         artifact_sha256=_sha(teacher_receipt),
         active=False,
     )
-    registry = CapabilityRegistry(output / "capability-registry.jsonl")
-    registry.append(capability)
+    CandidateRegistry(output / "candidate-registry.jsonl").append(candidate)
     teacher_payload = json.loads(teacher_receipt.read_text(encoding="utf-8"))
     metadata = {
         "outcome": "MVP_closed_loop",
@@ -164,7 +164,8 @@ def run_legacy_feedback_e2e(
         "holdout_opened": False,
         "burned_holdout_opened": False,
         "skill_auto_activated": False,
-        "capability_active": False,
+        "candidate_active": False,
+        "capability_created": False,
         "teacher_receipt_path": str(teacher_receipt),
         "teacher_receipt_sha256": _sha(teacher_receipt),
         "qwen_receipt_path": str(qwen_receipt),
@@ -187,7 +188,7 @@ def run_legacy_feedback_e2e(
     sources.mkdir()
     for index, path in enumerate(source_paths, 1):
         shutil.copyfile(path, sources / f"{index:02d}-{path.name}")
-    manifest = {"schema_version": 1, "entries": []}
+    manifest: dict[str, Any] = {"schema_version": 1, "entries": []}
     for path in sorted(output.rglob("*")):
         if path.is_file() and path != paths.manifest_path:
             manifest["entries"].append(

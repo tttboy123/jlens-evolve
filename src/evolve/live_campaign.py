@@ -3,7 +3,7 @@
 This module composes existing v3 authorities.  It does not dispatch adapters,
 manufacture native facts, interpret evaluator results, or activate assets on its
 own: plans go through :class:`ExecutionRuntime`, outcomes go through the native
-Observer and ClaimEngine, and the resulting Capability remains inactive.
+Observer and ClaimEngine, and any approved Capability remains inactive.
 """
 
 from __future__ import annotations
@@ -26,7 +26,18 @@ from evolve.contracts import (
     ModelIdentity,
     TaskRevision,
 )
-from evolve.evidence import ClaimEngine, ReceiptStore
+from evolve.evidence import (
+    CandidateEvidenceState,
+    ClaimEngine,
+    EvidenceGradeMachine,
+    ReceiptStore,
+)
+from evolve.governance import (
+    GateDecision,
+    GovernanceService,
+    PromotionDecision,
+    PromotionDecisionLog,
+)
 from evolve.kernel import (
     CampaignController,
     CampaignSnapshot,
@@ -34,7 +45,14 @@ from evolve.kernel import (
     WorkItemSnapshot,
 )
 from evolve.observers import ObserverHub
-from evolve.registry import CapabilityRecord, CapabilityRegistry
+from evolve.registry import (
+    CandidateRecord,
+    CandidateRegistry,
+    CapabilityRecord,
+    CapabilityRegistry,
+    RejectedRecord,
+    RejectedRegistry,
+)
 from evolve.reporting import CampaignReportProjector, ReportPaths
 from evolve.runtime import (
     ExecutionResult,
@@ -62,6 +80,8 @@ class LiveCampaignSpec:
     observer_policy_ids: tuple[str, ...]
     limits: ExecutionLimits
     final_commit_sha: str
+    mechanism_id: str | None = None
+    human_approval: bool = False
     generation_config: Mapping[str, Any] = field(default_factory=dict)
     task_execution_metadata: Mapping[str, Mapping[str, Any]] = field(
         default_factory=dict
@@ -76,7 +96,11 @@ class LiveCampaignResult:
     plans: tuple[ExecutionPlan, ...]
     executions: tuple[ExecutionResult, ...]
     claims: tuple[Claim, ...]
-    capability: CapabilityRecord
+    candidate: CandidateRecord
+    evidence_state: CandidateEvidenceState
+    promotion_decision: PromotionDecision
+    capability: CapabilityRecord | None
+    rejected: RejectedRecord | None
     snapshot: CampaignSnapshot
     report: Mapping[str, Any]
     report_paths: ReportPaths
@@ -95,7 +119,12 @@ def run_skill_paired_campaign(
     receipt_store: ReceiptStore,
     observer_hub: ObserverHub,
     claim_engine: ClaimEngine,
+    evidence_grade_machine: EvidenceGradeMachine,
+    governance_service: GovernanceService,
+    promotion_decision_log: PromotionDecisionLog,
+    candidate_registry: CandidateRegistry,
     capability_registry: CapabilityRegistry,
+    rejected_registry: RejectedRegistry,
     report_root: str | Path,
     clock: Callable[[], datetime] | None = None,
 ) -> LiveCampaignResult:
@@ -171,6 +200,12 @@ def run_skill_paired_campaign(
     for plan in plans:
         execution = runtime.execute(plan, authorization)
         executions.append(execution)
+        _validate_candidate_isolation(
+            plans=(plan,),
+            executions=(execution,),
+            candidate_revision_id=spec.candidate_revision_id,
+            candidate_bundle_sha256=spec.candidate_artifact_sha256,
+        )
         if not terminal_replay:
             item = _work_item(controller.snapshot(), plan.plan_id)
             if item.status == "pending":
@@ -201,14 +236,19 @@ def run_skill_paired_campaign(
         )
         for baseline, taught in plan_pairs
     )
-    capability = CapabilityRecord(
-        capability_id=spec.candidate_id,
+    candidate = CandidateRecord(
+        candidate_id=spec.candidate_id,
         revision_id=spec.candidate_revision_id,
-        capability_kind=spec.candidate_kind,
-        evidence_claim_ids=tuple(claim.claim_id for claim in claims),
+        candidate_kind=spec.candidate_kind,
+        source_claim_ids=tuple(claim.claim_id for claim in claims),
         artifact_sha256=spec.candidate_artifact_sha256,
     )
-    capability_registry.append(capability)
+    candidate_registry.append(candidate)
+    evidence_state = evidence_grade_machine.aggregate(
+        spec.candidate_id,
+        task_projects={task.revision_id: task.project for task in task_rows},
+        mechanism_id=spec.mechanism_id,
+    )
 
     snapshot = controller.snapshot()
     campaign_receipts = tuple(
@@ -216,6 +256,43 @@ def run_skill_paired_campaign(
         for receipt in receipt_store.list_receipts()
         if receipt.campaign_id == spec.campaign_id
     )
+    if not campaign_receipts:
+        raise ContractViolation("completed campaign has no receipts")
+    runtime_spend_cny = round(
+        sum(
+            float(receipt.payload.get("cost_cny", 0))
+            for receipt in campaign_receipts
+            if receipt.kind == "cost"
+        ),
+        8,
+    )
+    budget_spent_cny = float(
+        spec.report_metadata.get("actual_api_spend_cny", runtime_spend_cny)
+    )
+    promotion_decision = governance_service.decide(
+        candidate=candidate,
+        evidence=evidence_state,
+        claims=claims,
+        human_approval=spec.human_approval,
+        decided_at=max(receipt.created_at for receipt in campaign_receipts),
+        log=promotion_decision_log,
+    )
+    capability: CapabilityRecord | None = None
+    rejected: RejectedRecord | None = None
+    if promotion_decision.gate_decision is GateDecision.APPROVED:
+        capability = governance_service.to_capability(
+            candidate=candidate,
+            decision=promotion_decision,
+            capability_id=spec.candidate_id,
+        )
+        capability_registry.append(capability)
+    elif promotion_decision.gate_decision is GateDecision.REJECTED:
+        rejected = governance_service.to_rejected(
+            candidate=candidate,
+            decision=promotion_decision,
+        )
+        rejected_registry.append(rejected)
+
     projector = CampaignReportProjector()
     report = projector.project(
         campaign_id=spec.campaign_id,
@@ -226,9 +303,41 @@ def run_skill_paired_campaign(
             **dict(spec.report_metadata),
             "campaign_status": str(snapshot.status),
             "task_revision_ids": [task.revision_id for task in task_rows],
-            "capability_id": capability.capability_id,
-            "capability_revision_id": capability.revision_id,
-            "capability_active": capability.active,
+            "candidate_id": candidate.candidate_id,
+            "candidate_revision_id": candidate.revision_id,
+            "evidence_grade_reached": str(evidence_state.grade),
+            "e3_eligible": evidence_state.e3_eligible,
+            "promotion_status": str(promotion_decision.gate_decision),
+            "promotion_decision_id": promotion_decision.decision_id,
+            "capability_id": (
+                capability.capability_id if capability is not None else None
+            ),
+            "capability_revision_id": (
+                capability.revision_id if capability is not None else None
+            ),
+            "capability_active": (
+                capability.active if capability is not None else False
+            ),
+            "rejected_revision_id": (
+                rejected.revision_id if rejected is not None else None
+            ),
+            "implementation_status": "complete",
+            "causal_pipeline_status": (
+                "validated"
+                if all(execution.status == "completed" for execution in executions)
+                else "not_validated"
+            ),
+            "empirical_gain_status": evidence_state.classification,
+            "budget_spent_cny": budget_spent_cny,
+            "full_v3_release_status": "incomplete",
+            "unresolved_findings": [
+                *(
+                    []
+                    if evidence_state.grade.value == "E3"
+                    else ["E3 evidence was not reached by this feedback campaign"]
+                ),
+                "holdout/final release gates were intentionally not opened",
+            ],
         },
     )
     report_paths = projector.write(report, Path(report_root))
@@ -236,11 +345,49 @@ def run_skill_paired_campaign(
         plans=plans,
         executions=tuple(executions),
         claims=claims,
+        candidate=candidate,
+        evidence_state=evidence_state,
+        promotion_decision=promotion_decision,
         capability=capability,
+        rejected=rejected,
         snapshot=snapshot,
         report=report,
         report_paths=report_paths,
     )
+
+
+def _validate_candidate_isolation(
+    *,
+    plans: tuple[ExecutionPlan, ...],
+    executions: tuple[ExecutionResult, ...],
+    candidate_revision_id: str,
+    candidate_bundle_sha256: str,
+) -> None:
+    """Prove baseline isolation and taught consumption from immutable receipts."""
+
+    if len(plans) != len(executions):
+        raise ContractViolation("causal execution result count mismatch")
+    for plan, execution in zip(plans, executions, strict=True):
+        model_receipts = [row for row in execution.receipts if row.kind == "model"]
+        if len(model_receipts) != 1:
+            raise ContractViolation("causal execution requires one model receipt")
+        payload = model_receipts[0].payload
+        if plan.arm == "baseline":
+            if (
+                payload.get("candidate_consumed") is not False
+                or payload.get("candidate_bundle_sha256") is not None
+                or payload.get("candidate_revision_id") is not None
+            ):
+                raise ContractViolation("baseline consumed or exposed candidate state")
+        elif plan.arm == "taught":
+            if (
+                payload.get("candidate_consumed") is not True
+                or payload.get("candidate_bundle_sha256") != candidate_bundle_sha256
+                or payload.get("candidate_revision_id") != candidate_revision_id
+            ):
+                raise ContractViolation("taught arm did not consume compiled candidate")
+        else:
+            raise ContractViolation("causal campaign requires paired arms")
 
 
 def _validate_admission(
@@ -257,9 +404,7 @@ def _validate_admission(
         )
     if len({task.revision_id for task in tasks}) != len(tasks):
         raise ContractViolation("live Skill campaign task revisions must be unique")
-    if set(spec.task_execution_metadata) != {
-        task.revision_id for task in tasks
-    }:
+    if set(spec.task_execution_metadata) != {task.revision_id for task in tasks}:
         raise ContractViolation("live Skill campaign metadata must cover every task")
     snapshot = controller.snapshot()
     if snapshot.campaign_id != spec.campaign_id:
@@ -308,11 +453,7 @@ def _execution_cost(execution: ExecutionResult) -> float:
     )
     if len(cost_receipts) > 1:
         raise ContractViolation("Runtime produced duplicate cost receipts")
-    return (
-        float(cost_receipts[0].payload["cost_cny"])
-        if cost_receipts
-        else 0.0
-    )
+    return float(cost_receipts[0].payload["cost_cny"]) if cost_receipts else 0.0
 
 
 def _execution_model_calls(execution: ExecutionResult) -> int:

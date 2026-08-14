@@ -7,11 +7,13 @@ from dataclasses import replace
 import pytest
 
 from evolve.contracts import (
+    ClaimGrade,
     Cohort,
     ExecutionLimits,
     ModelIdentity,
     TaskRevision,
 )
+from evolve.governance import GateDecision, PromotionDecision, PromotionDecisionLog
 from evolve.registry import (
     AgentProgramRecord,
     AgentProgramRegistry,
@@ -138,10 +140,14 @@ def test_skill_paired_strategy_preserves_frozen_task_execution_metadata() -> Non
         plan_metadata=metadata,
     )
 
-    assert baseline.metadata == taught.metadata == {
-        **metadata,
-        "generation_config": {"temperature": 0},
-    }
+    assert (
+        baseline.metadata
+        == taught.metadata
+        == {
+            **metadata,
+            "generation_config": {"temperature": 0},
+        }
+    )
 
 
 @pytest.mark.parametrize(
@@ -299,7 +305,26 @@ def test_candidate_registry_is_append_only_idempotent_and_inactive(tmp_path) -> 
 def test_capability_and_agent_program_registries_are_revision_append_only(
     tmp_path,
 ) -> None:
-    capability_registry = CapabilityRegistry(tmp_path / "capabilities.jsonl")
+    decision_log = PromotionDecisionLog(tmp_path / "promotion-decisions.jsonl")
+    decision = PromotionDecision(
+        decision_id="decision-e3-approved-1",
+        candidate_id="candidate-symbol-rewrite",
+        candidate_revision_id="cap-r1",
+        gate_decision=GateDecision.APPROVED,
+        evidence_grade=ClaimGrade.E3,
+        claim_ids=("claim-e3-1",),
+        prediction_evidence_ids=(
+            "external-evidence-1",
+            "internal-evidence-1",
+        ),
+        human_approval=True,
+        decided_at="2026-08-14T04:00:00Z",
+        rationale="approved E3 capability",
+    )
+    decision_log.append(decision)
+    capability_registry = CapabilityRegistry(
+        tmp_path / "capabilities.jsonl", decision_log=decision_log
+    )
     program_registry = AgentProgramRegistry(tmp_path / "programs.jsonl")
     capability = CapabilityRecord(
         capability_id="cap-symbol-rewrite",
@@ -307,6 +332,8 @@ def test_capability_and_agent_program_registries_are_revision_append_only(
         capability_kind="operator",
         evidence_claim_ids=("claim-e3-1",),
         artifact_sha256=hashlib.sha256(b"operator").hexdigest(),
+        promotion_decision_id="decision-e3-approved-1",
+        source_candidate_id="candidate-symbol-rewrite",
     )
     program = AgentProgramRecord(
         program_id="program-default",

@@ -45,32 +45,30 @@ class SkillPairedStrategy:
         if "generation_config" in metadata:
             raise StrategyViolation("plan_metadata cannot replace generation_config")
         metadata["generation_config"] = generation
-        common = {
-            "campaign_id": campaign_id,
-            "strategy_id": self.strategy_id,
-            "task": task,
-            "model": model,
-            "context_policy_id": context_policy_id,
-            "tool_policy_id": tool_policy_id,
-            "observer_policy_ids": observer_policy_ids,
-            "native_evaluator_id": task.evaluator_id,
-            "limits": limits,
-            "holdout_scope": "feedback-only",
-        }
-        plans = tuple(
-            ExecutionPlan(
+
+        def build(arm: str, candidate_revision_id: str) -> ExecutionPlan:
+            return ExecutionPlan(
                 plan_id=self._plan_id(
                     campaign_id, task.revision_id, candidate_revision_id, arm
                 ),
+                campaign_id=campaign_id,
+                strategy_id=self.strategy_id,
+                task=task,
                 candidate_revision_id=candidate_revision_id,
                 arm=arm,
+                model=model,
+                context_policy_id=context_policy_id,
+                tool_policy_id=tool_policy_id,
+                observer_policy_ids=observer_policy_ids,
+                native_evaluator_id=task.evaluator_id,
+                limits=limits,
+                holdout_scope="feedback-only",
                 metadata=metadata,
-                **common,
             )
-            for arm, candidate_revision_id in (
-                ("baseline", baseline_revision_id),
-                ("taught", taught_revision_id),
-            )
+
+        plans = (
+            build("baseline", baseline_revision_id),
+            build("taught", taught_revision_id),
         )
         self.validate_matched_pair(*plans)
         return plans

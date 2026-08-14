@@ -6,7 +6,6 @@ import hashlib
 import importlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,16 +22,32 @@ from evolve.contracts import (
     TaskRevision,
     canonical_json,
 )
-from evolve.evidence import ClaimEngine, EvidenceGraph, ReceiptStore
-from evolve.kernel import CampaignController, CheckpointManager
+from evolve.evidence import (
+    ClaimEngine,
+    EvidenceGradeMachine,
+    EvidenceGraph,
+    ReceiptStore,
+)
+from evolve.governance import GovernanceService, PromotionDecisionLog
+from evolve.kernel import (
+    CampaignController,
+    CheckpointManager,
+    DurableCostLedger,
+)
 from evolve.live_campaign import LiveCampaignSpec, run_skill_paired_campaign
 from evolve.observers import (
     CostObserver,
     ExternalTraceObserver,
+    JacobianLensObserver,
     NativeOutcomeObserver,
     ObserverHub,
 )
-from evolve.registry import CandidateRecord, CandidateRegistry, CapabilityRegistry
+from evolve.proposals import CandidateCompiler, CompiledRevision, CompileSpec
+from evolve.registry import (
+    CandidateRegistry,
+    CapabilityRegistry,
+    RejectedRegistry,
+)
 from evolve.reporting import AuditVerifier
 from evolve.runtime.live_adapters import (
     FrozenSourceWorkspaceManager,
@@ -50,6 +65,7 @@ _DATASETS = {
     "swe-bench-verified": "harness-inputs/swe-bench-verified.jsonl",
     "swe-bench-multilingual": "harness-inputs/swe-bench-multilingual.jsonl",
 }
+_EXPERIMENT_MECHANISM_ID = "compiled-teacher-candidate-v1"
 
 
 def _sha256(path: Path) -> str:
@@ -103,10 +119,15 @@ def _load_config(path: Path) -> dict[str, Any]:
     if len({row.get("instance_id") for row in tasks if isinstance(row, dict)}) != 3:
         raise ContractViolation("fresh feedback task identities must be unique")
     if any(
-        not isinstance(row, dict) or row.get("cohort") != "feedback"
-        for row in tasks
+        not isinstance(row, dict) or row.get("cohort") != "feedback" for row in tasks
     ):
         raise ContractViolation("fresh feedback config cannot admit holdout tasks")
+    forbidden_fallbacks = {"operator_skill_path", "span_skill_path"} & set(config)
+    if forbidden_fallbacks:
+        raise ContractViolation(
+            "legacy frozen Skill fallback fields are forbidden: "
+            + ", ".join(sorted(forbidden_fallbacks))
+        )
     return config
 
 
@@ -184,7 +205,10 @@ def _build_tasks(
     for row in rows:
         checkout = Path(str(row.get("source_uri", ""))).expanduser().resolve()
         base_revision = str(row.get("base_revision", ""))
-        if not checkout.is_dir() or _git(checkout, "rev-parse", "HEAD") != base_revision:
+        if (
+            not checkout.is_dir()
+            or _git(checkout, "rev-parse", "HEAD") != base_revision
+        ):
             raise ContractViolation("fresh feedback source revision drift")
         if _git(checkout, "status", "--porcelain", "--untracked-files=all"):
             raise ContractViolation("fresh feedback source checkout is not clean")
@@ -233,7 +257,9 @@ def _build_tasks(
             }
         )
     if len({task.project for task in tasks}) < 2:
-        raise ContractViolation("fresh feedback campaign requires at least two projects")
+        raise ContractViolation(
+            "fresh feedback campaign requires at least two projects"
+        )
     return tuple(tasks), metadata, source_inventory
 
 
@@ -260,59 +286,72 @@ def _freeze_harness(config: Mapping[str, Any], output_root: Path) -> Path:
     return Path(receipt).resolve()
 
 
-def _teacher_evidence(config: Mapping[str, Any], output_root: Path) -> tuple[Path, dict]:
-    source = _path(config, "teacher_receipt")
-    try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ContractViolation("Teacher receipt is unreadable") from error
-    if (
-        payload.get("provider") != "deepseek"
-        or payload.get("candidate_status") != "inactive"
-        or payload.get("auto_activate") is not False
-        or not isinstance(payload.get("estimated_cost_cny"), (int, float))
-        or not 0 <= float(payload["estimated_cost_cny"]) <= 10
-    ):
-        raise ContractViolation("Teacher receipt violates budget or activation policy")
-    destination = output_root / "input-evidence" / "DEEPSEEK-TEACHER-RESPONSE.json"
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        if _sha256(destination) != _sha256(source):
-            raise ContractViolation("frozen Teacher evidence drift")
-    else:
-        shutil.copyfile(source, destination)
-    return destination, payload
+def _compile_teacher_candidate(*, config: Mapping[str, Any], output_root: Path):
+    candidate_id = str(config.get("candidate_id", ""))
+    revision_id = str(config.get("candidate_revision_id", ""))
+    task_ids = tuple(str(row["instance_id"]) for row in config["tasks"])
+    operator_id = str(
+        config.get("compiled_operator_id", "apply-compiled-teacher-candidate")
+    )
+    spec = CompileSpec(
+        candidate_id=candidate_id,
+        revision_id=revision_id,
+        parent_revision_id="qwen-zero-teaching-v1",
+        cohort=Cohort.FEEDBACK,
+        operator_id=operator_id,
+        operator_instruction=str(
+            config.get(
+                "compiled_operator_instruction",
+                "Apply the compiled inactive Teacher teaching to this paired arm.",
+            )
+        ),
+        routes=tuple((task_id, operator_id) for task_id in task_ids),
+    )
+    return CandidateCompiler().compile(
+        request_path=_path(config, "teacher_request"),
+        response_path=_path(config, "teacher_response"),
+        compile_spec=spec,
+        output_root=output_root / "compiled-candidates",
+    )
 
 
-def _freeze_candidate_bundle(
-    *,
-    config: Mapping[str, Any],
-    output_root: Path,
-    teacher_path: Path,
-    model_hashes: Mapping[str, str],
-) -> tuple[Path, str]:
-    payload = {
-        "schema_version": 1,
-        "candidate_status": "inactive",
-        "auto_activate": False,
-        "teacher_receipt_sha256": _sha256(teacher_path),
-        "operator_skill_sha256": _sha256(_path(config, "operator_skill_path")),
-        "span_skill_sha256": _sha256(_path(config, "span_skill_path")),
-        "taskset_sha256": _sha256(_path(config, "taskset_path")),
-        "routes_sha256": _sha256(_path(config, "routes_path")),
-        "model_identity_sha256": dict(model_hashes),
-    }
-    path = output_root / "input-evidence" / "CANDIDATE-BUNDLE.json"
-    if path.exists():
+def _freeze_release_candidate_artifacts(
+    compiled: CompiledRevision, output_root: Path
+) -> None:
+    """Expose the self-contained causal chain at the run root without rewriting it."""
+
+    names = (
+        "TEACHER-REQUEST.json",
+        "TEACHER-RESPONSE.json",
+        "MODEL-RECEIPT.json",
+        "COST-RECEIPT.json",
+        "CANDIDATE-CHANGESET.json",
+        "COMPILED-SKILL.json",
+        "COMPILED-OPERATOR.json",
+        "COMPILED-ROUTER.json",
+        "COMPILED-REVISION.json",
+    )
+    for name in names:
+        source = compiled.root / name
+        content = source.read_bytes()
+        target = output_root / name
         try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            raise ContractViolation("frozen candidate bundle is unreadable") from error
-        if existing != payload:
-            raise ContractViolation("frozen candidate bundle identity drift")
-    else:
-        _atomic_json(path, payload)
-    return path, _sha256(path)
+            descriptor = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError as error:
+            if target.read_bytes() != content:
+                raise ContractViolation(
+                    f"immutable release candidate artifact conflict: {name}"
+                ) from error
+            continue
+        try:
+            written = os.write(descriptor, content)
+            if written != len(content):
+                raise ContractViolation(
+                    f"partial release candidate artifact write: {name}"
+                )
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str, Any]:
@@ -339,22 +378,37 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         pool_root=pool_root,
         benchmarks={str(row["benchmark_id"]) for row in config["tasks"]},
     )
-    tasks, task_metadata, source_inventory = _build_tasks(
-        config["tasks"], evaluator_id
-    )
+    tasks, task_metadata, source_inventory = _build_tasks(config["tasks"], evaluator_id)
+    task_metadata = {
+        revision_id: {**metadata, "mechanism_id": _EXPERIMENT_MECHANISM_ID}
+        for revision_id, metadata in task_metadata.items()
+    }
     model, model_hashes = _model_identity(model_path)
-    teacher_path, teacher = _teacher_evidence(config, output_root)
-    _, candidate_bundle_sha256 = _freeze_candidate_bundle(
-        config=config,
-        output_root=output_root,
-        teacher_path=teacher_path,
-        model_hashes=model_hashes,
-    )
-    for metadata in task_metadata.values():
-        metadata["candidate_bundle_sha256"] = candidate_bundle_sha256
+    compiled = _compile_teacher_candidate(config=config, output_root=output_root)
+    _freeze_release_candidate_artifacts(compiled, output_root)
     harness_receipt = _freeze_harness(config, output_root)
 
     campaign_id = str(config.get("campaign_id", ""))
+    teacher_ledger = DurableCostLedger(
+        output_root / "cost-ledger/events.jsonl",
+        campaign_id=campaign_id,
+        max_cost_cny=10.0,
+        max_model_calls=1,
+    )
+    teacher_reservation_id = "teacher-reservation-" + compiled.bundle_sha256[:24]
+    teacher_result_id = "teacher-result-" + compiled.bundle_sha256[:24]
+    teacher_ledger.reserve(
+        teacher_reservation_id,
+        cost_cny=compiled.cost_cny,
+        model_calls=1,
+    )
+    teacher_ledger.record(
+        teacher_reservation_id,
+        result_id=teacher_result_id,
+        actual_cost_cny=compiled.cost_cny,
+        actual_model_calls=1,
+    )
+    teacher_budget = teacher_ledger.snapshot()
     now = datetime.now(UTC)
     authorization = Authorization(
         authorization_id=f"auth-{campaign_id}",
@@ -385,15 +439,20 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
     receipt_store = ReceiptStore(output_root / "receipt-store")
     graph = EvidenceGraph(output_root / "evidence-graph")
     observer_hub = ObserverHub(
-        (ExternalTraceObserver(), NativeOutcomeObserver(), CostObserver()), graph=graph
+        (
+            ExternalTraceObserver(),
+            JacobianLensObserver(),
+            NativeOutcomeObserver(),
+            CostObserver(),
+        ),
+        graph=graph,
     )
     runner = LegacyQwenCellRunner(
         legacy_root=legacy_root,
         model_path=model_path,
         taskset_path=_path(config, "taskset_path"),
         routes_path=_path(config, "routes_path"),
-        operator_skill_path=_path(config, "operator_skill_path"),
-        span_skill_path=_path(config, "span_skill_path"),
+        compiled_revision_root=compiled.root,
     )
     transport = LegacyQwenPairTransport(
         cell_runner=runner, output_root=output_root / "qwen-cells"
@@ -409,24 +468,29 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         output_root=output_root / "native-official",
         timeout_seconds=int(config.get("native_timeout_seconds", 7200)),
     )
-    candidate_id = str(config.get("candidate_id", ""))
-    candidate_revision = str(config.get("candidate_revision_id", ""))
-    spend = float(teacher["estimated_cost_cny"])
+    candidate_id = compiled.change_set.candidate_id
+    candidate_revision = compiled.change_set.revision_id
+    spend = teacher_budget.spent_cost_cny
     spec = LiveCampaignSpec(
         campaign_id=campaign_id,
         baseline_revision_id="qwen-zero-teaching-v1",
         candidate_id=candidate_id,
         candidate_revision_id=candidate_revision,
         candidate_kind="external-skill",
-        candidate_artifact_sha256=candidate_bundle_sha256,
+        candidate_artifact_sha256=compiled.bundle_sha256,
         model=model,
         context_policy_id="frozen-feedback-task-v1",
         tool_policy_id="deterministic-operator-span-v1",
-        observer_policy_ids=("external-trace-v1", "native-v1", "cost-v1"),
-        limits=ExecutionLimits(
-            max_tokens=1536, max_seconds=7200, max_cost_cny=0
+        observer_policy_ids=(
+            "external-trace-v1",
+            "jlens-v1",
+            "native-v1",
+            "cost-v1",
         ),
+        limits=ExecutionLimits(max_tokens=1536, max_seconds=7200, max_cost_cny=0),
         final_commit_sha=final_commit,
+        mechanism_id=_EXPERIMENT_MECHANISM_ID,
+        human_approval=False,
         generation_config={
             "temperature": 0,
             "seed": 0,
@@ -442,8 +506,21 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
             "api_budget_limit_cny": 10.0,
             "api_budget_remaining_cny": round(10.0 - spend, 8),
             "teacher_call_mode": "frozen_real_receipt_replay",
-            "teacher_receipt_sha256": _sha256(teacher_path),
-            "candidate_bundle_sha256": candidate_bundle_sha256,
+            "teacher_request_sha256": dict(compiled.artifact_sha256)[
+                "TEACHER-REQUEST.json"
+            ],
+            "teacher_response_sha256": dict(compiled.artifact_sha256)[
+                "TEACHER-RESPONSE.json"
+            ],
+            "candidate_sha256": compiled.change_set.source_candidate_sha256,
+            "compiled_revision_sha256": compiled.change_set.content_sha256,
+            "compiled_bundle_sha256": compiled.bundle_sha256,
+            "baseline_program_sha256": hashlib.sha256(
+                b"qwen-zero-teaching-v1"
+            ).hexdigest(),
+            "taught_program_sha256": hashlib.sha256(
+                ("qwen-zero-teaching-v1\0" + compiled.bundle_sha256).encode()
+            ).hexdigest(),
             "holdout_opened": False,
             "burned_holdout_opened": False,
             "skill_auto_activated": False,
@@ -453,6 +530,9 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
             "feedback_task_count": 3,
             "project_count": len({task.project for task in tasks}),
         },
+    )
+    promotion_log = PromotionDecisionLog(
+        output_root / "registries/promotion-decisions.jsonl"
     )
     result = run_skill_paired_campaign(
         spec=spec,
@@ -466,19 +546,21 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         receipt_store=receipt_store,
         observer_hub=observer_hub,
         claim_engine=ClaimEngine(graph),
+        evidence_grade_machine=EvidenceGradeMachine(graph),
+        governance_service=GovernanceService(),
+        promotion_decision_log=promotion_log,
+        candidate_registry=CandidateRegistry(
+            output_root / "registries/candidates.jsonl"
+        ),
         capability_registry=CapabilityRegistry(
-            output_root / "registries/capabilities.jsonl"
+            output_root / "registries/capabilities.jsonl",
+            decision_log=promotion_log,
+        ),
+        rejected_registry=RejectedRegistry(
+            output_root / "registries/rejected.jsonl",
+            decision_log=promotion_log,
         ),
         report_root=output_root,
-    )
-    CandidateRegistry(output_root / "registries/candidates.jsonl").append(
-        CandidateRecord(
-            candidate_id=candidate_id,
-            revision_id=candidate_revision,
-            candidate_kind="external-skill",
-            source_claim_ids=tuple(claim.claim_id for claim in result.claims),
-            artifact_sha256=candidate_bundle_sha256,
-        )
     )
     _atomic_json(
         output_root / "SOURCE-INVENTORY.json",
@@ -499,25 +581,40 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
             }
             for task, claim in zip(tasks, result.claims, strict=True)
         ],
-        "capability_active": result.capability.active,
+        "evidence_grade_reached": str(result.evidence_state.grade),
+        "e3_eligible": result.evidence_state.e3_eligible,
+        "promotion_status": str(result.promotion_decision.gate_decision),
+        "capability_created": result.capability is not None,
+        "capability_active": (
+            result.capability.active if result.capability is not None else False
+        ),
         "holdout_opened": False,
         "burned_holdout_opened": False,
         "api_spend_cny": spend,
     }
     _atomic_json(output_root / "CAMPAIGN-RESULT.json", summary)
     _atomic_json(
-        output_root / "COST-LEDGER.json",
+        output_root / "COST-LEDGER-SNAPSHOT.json",
         {
             "schema_version": 1,
-            "budget_cny": 10.0,
-            "actual_spend_cny": spend,
-            "remaining_cny": round(10.0 - spend, 8),
+            "authority_path": "cost-ledger/events.jsonl",
+            "budget_cny": teacher_budget.max_cost_cny,
+            "reserved_cny": teacher_budget.reserved_cost_cny,
+            "actual_spend_cny": teacher_budget.spent_cost_cny,
+            "remaining_cny": round(
+                teacher_budget.max_cost_cny
+                - teacher_budget.spent_cost_cny
+                - teacher_budget.reserved_cost_cny,
+                8,
+            ),
             "teacher": {
-                "provider": teacher["provider"],
-                "model": teacher["model"],
-                "usage": teacher["usage"],
+                "provider": compiled.provider,
+                "model": compiled.model,
                 "cost_cny": spend,
-                "receipt_sha256": _sha256(teacher_path),
+                "request_id": teacher_result_id,
+                "cost_receipt_sha256": dict(compiled.artifact_sha256)[
+                    "COST-RECEIPT.json"
+                ],
             },
             "qwen": {"provider": "local-mlx", "api_cost_cny": 0},
         },

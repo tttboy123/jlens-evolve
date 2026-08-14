@@ -59,6 +59,30 @@ def test_fresh_config_denies_any_non_feedback_task(tmp_path: Path) -> None:
         _load_config(path)
 
 
+@pytest.mark.parametrize("field", ["operator_skill_path", "span_skill_path"])
+def test_fresh_config_denies_legacy_frozen_skill_fallbacks(
+    tmp_path: Path, field: str
+) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tasks": [
+                    {"instance_id": "a", "cohort": "feedback"},
+                    {"instance_id": "b", "cohort": "feedback"},
+                    {"instance_id": "c", "cohort": "feedback"},
+                ],
+                field: "/legacy/frozen-skill.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ContractViolation, match="fallback"):
+        _load_config(path)
+
+
 def test_build_tasks_binds_exact_clean_git_tree_and_feedback_identity(
     tmp_path: Path,
 ) -> None:
@@ -81,9 +105,7 @@ def test_build_tasks_binds_exact_clean_git_tree_and_feedback_identity(
     assert len(tasks) == len(metadata) == len(inventory) == 3
     assert all(str(task.cohort) == "feedback" for task in tasks)
     assert all(task.evaluator_id == "native-v1" for task in tasks)
-    assert metadata[tasks[0].revision_id]["base_revision"] == rows[0][
-        "base_revision"
-    ]
+    assert metadata[tasks[0].revision_id]["base_revision"] == rows[0]["base_revision"]
 
 
 def test_seal_run_hashes_every_non_source_artifact_and_verifies(tmp_path: Path) -> None:

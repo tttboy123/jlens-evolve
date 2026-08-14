@@ -61,6 +61,8 @@ class CapabilityRecord:
     capability_kind: str
     evidence_claim_ids: tuple[str, ...]
     artifact_sha256: str
+    promotion_decision_id: str | None = None
+    source_candidate_id: str | None = None
     active: bool = False
 
     def __post_init__(self) -> None:
@@ -71,10 +73,51 @@ class CapabilityRecord:
         )
         if not self.evidence_claim_ids:
             raise RegistryViolation("capability must reference evidence claims")
+        if (
+            self.promotion_decision_id is not None
+            and not self.promotion_decision_id.strip()
+        ):
+            raise RegistryViolation("promotion_decision_id must be non-empty")
+        if (
+            self.source_candidate_id is not None
+            and not self.source_candidate_id.strip()
+        ):
+            raise RegistryViolation("source_candidate_id must be non-empty")
 
     @property
     def key(self) -> tuple[str, str]:
         return self.capability_id, self.revision_id
+
+    @property
+    def content_sha256(self) -> str:
+        return content_sha256(self)
+
+
+@dataclass(frozen=True, slots=True)
+class RejectedRecord:
+    candidate_id: str
+    revision_id: str
+    candidate_kind: str
+    evidence_claim_ids: tuple[str, ...]
+    promotion_decision_id: str
+    reason: str
+    artifact_sha256: str
+    active: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_record(
+            (self.candidate_id, self.revision_id, self.candidate_kind),
+            self.artifact_sha256,
+            self.active,
+        )
+        if not self.evidence_claim_ids:
+            raise RegistryViolation("rejected candidate must reference evidence claims")
+        if not self.promotion_decision_id.strip() or not self.reason.strip():
+            raise RegistryViolation("rejection must reference a decision and reason")
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.candidate_id, self.revision_id
 
     @property
     def content_sha256(self) -> str:

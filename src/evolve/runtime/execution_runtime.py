@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from evolve.contracts import (
@@ -75,6 +77,7 @@ class ExecutionRuntime:
             "workspace",
             "model",
             "external_trace",
+            "internal_trace",
             "cost",
             "native_evaluation",
             "execution_terminal",
@@ -94,8 +97,7 @@ class ExecutionRuntime:
             )
             if (
                 workspace_receipt is None
-                or workspace_receipt.payload.get("plan_sha256")
-                != plan.content_sha256
+                or workspace_receipt.payload.get("plan_sha256") != plan.content_sha256
             ):
                 raise ContractViolation("terminal replay plan identity mismatch")
             return ExecutionResult(
@@ -140,21 +142,38 @@ class ExecutionRuntime:
 
             trace_receipt = existing_by_kind.get("external_trace")
             if trace_receipt is None:
+                prediction_sha256 = _model_prediction_sha256(model_output)
+                mechanism_id = model_output.get(
+                    "mechanism_id", plan.metadata.get("mechanism_id")
+                )
                 trace_payload = {
                     "model_receipt_id": model_receipt.receipt_id,
                     "model_artifact_sha256": model_receipt.artifact_sha256,
                     "arm": plan.arm,
                     "task_revision_id": plan.task.revision_id,
                 }
+                if mechanism_id is not None:
+                    trace_payload["mechanism_id"] = mechanism_id
+                if prediction_sha256 is not None:
+                    _require_sha256(prediction_sha256, "external prediction")
+                    trace_payload["prediction_sha256"] = prediction_sha256
+                    trace_payload["observation_sha256"] = prediction_sha256
                 for name in (
                     "raw_output_path",
                     "raw_output_sha256",
                     "prompt_paths",
                     "prompt_sha256",
+                    "patch",
+                    "patch_sha256",
                     "structural_valid",
                     "failure_reason",
                     "mechanism",
                     "condition_id",
+                    "candidate_consumed",
+                    "candidate_bundle_sha256",
+                    "candidate_revision_id",
+                    "compiled_artifact_sha256",
+                    "model_identity_sha256",
                 ):
                     if name in model_output:
                         trace_payload[name] = model_output[name]
@@ -164,6 +183,53 @@ class ExecutionRuntime:
                 != model_receipt.receipt_id
             ):
                 raise ContractViolation("resume external trace identity mismatch")
+
+            internal_receipt = existing_by_kind.get("internal_trace")
+            internal_payload = model_output.get("internal_trace")
+            if internal_receipt is None and internal_payload is not None:
+                if not isinstance(internal_payload, Mapping):
+                    raise ContractViolation("internal trace must be a mapping")
+                internal_payload = dict(internal_payload)
+                trace_path = internal_payload.get("artifact_path")
+                trace_sha256 = internal_payload.get("artifact_sha256")
+                if not isinstance(trace_path, str) or not trace_path:
+                    raise ContractViolation("internal trace artifact path is missing")
+                trace = Path(trace_path).resolve()
+                if not trace.is_file():
+                    raise ContractViolation("internal trace artifact is missing")
+                _require_sha256(trace_sha256, "internal trace artifact")
+                if _file_sha256(trace) != trace_sha256:
+                    raise ContractViolation("internal trace artifact hash mismatch")
+                try:
+                    trace_payload = json.loads(trace.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                    raise ContractViolation(
+                        "internal trace artifact is invalid"
+                    ) from error
+                if not isinstance(trace_payload, Mapping):
+                    raise ContractViolation("internal trace artifact must be an object")
+                prediction = trace_payload.get("prediction_sha256")
+                _require_sha256(prediction, "internal prediction")
+                mechanism = internal_payload.get(
+                    "mechanism_id", plan.metadata.get("mechanism_id")
+                )
+                if not isinstance(mechanism, str) or not mechanism.strip():
+                    raise ContractViolation("internal trace mechanism is missing")
+                internal_payload.update(
+                    {
+                        "arm": plan.arm,
+                        "task_revision_id": plan.task.revision_id,
+                        "mechanism_id": mechanism,
+                        "model_receipt_id": model_receipt.receipt_id,
+                        "artifact_path": str(trace),
+                        "artifact_sha256": trace_sha256,
+                        "prediction_sha256": prediction,
+                        "observation_sha256": prediction,
+                    }
+                )
+                appender.append_fact("internal_trace", internal_payload)
+            elif internal_receipt is not None and internal_payload is None:
+                raise ContractViolation("resume internal trace identity mismatch")
 
             cost_receipt = existing_by_kind.get("cost")
             if cost_receipt is None:
@@ -194,6 +260,20 @@ class ExecutionRuntime:
                 native_payload = dict(
                     self._native_evaluator.evaluate(plan, workspace, model_output)
                 )
+                native_prediction = native_payload.get(
+                    "prediction_sha256", native_payload.get("patch_sha256")
+                )
+                if native_prediction is not None:
+                    _require_sha256(native_prediction, "native prediction")
+                    external_prediction = _model_prediction_sha256(model_output)
+                    if (
+                        external_prediction is None
+                        or native_prediction != external_prediction
+                    ):
+                        raise ContractViolation(
+                            "native prediction does not match model artifact"
+                        )
+                    native_payload["prediction_sha256"] = native_prediction
                 native_payload.update(_native_identity(plan))
                 native_payload["evaluator_error"] = None
                 appender.append_fact("native_evaluation", native_payload)
@@ -315,6 +395,37 @@ def _validated_cost(value: object) -> float:
     if numeric < 0 or not math.isfinite(numeric):
         raise ContractViolation("model cost must be finite and non-negative")
     return numeric
+
+
+def _require_sha256(value: object, field: str) -> None:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ContractViolation(f"{field} must be a literal SHA-256")
+
+
+def _model_prediction_sha256(model_output: Mapping[str, Any]) -> str | None:
+    patch = model_output.get("patch")
+    patch_sha256 = model_output.get("patch_sha256")
+    if patch is None and patch_sha256 is None:
+        return None
+    if not isinstance(patch, str):
+        raise ContractViolation("model prediction patch must be literal text")
+    _require_sha256(patch_sha256, "model prediction")
+    derived = hashlib.sha256(patch.encode("utf-8")).hexdigest()
+    if derived != patch_sha256:
+        raise ContractViolation("model prediction artifact hash mismatch")
+    return derived
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _native_identity(plan: ExecutionPlan) -> dict[str, Any]:

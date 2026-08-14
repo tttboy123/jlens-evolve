@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -17,7 +19,17 @@ from evolve.contracts import (
     ModelIdentity,
     TaskRevision,
 )
-from evolve.evidence import ClaimEngine, EvidenceGraph, ReceiptStore
+from evolve.evidence import (
+    ClaimEngine,
+    EvidenceGradeMachine,
+    EvidenceGraph,
+    ReceiptStore,
+)
+from evolve.governance import (
+    GateDecision,
+    GovernanceService,
+    PromotionDecisionLog,
+)
 from evolve.kernel import (
     CampaignController,
     CampaignStatus,
@@ -27,10 +39,15 @@ from evolve.live_campaign import LiveCampaignSpec, run_skill_paired_campaign
 from evolve.observers import (
     CostObserver,
     ExternalTraceObserver,
+    JacobianLensObserver,
     NativeOutcomeObserver,
     ObserverHub,
 )
-from evolve.registry import CapabilityRegistry
+from evolve.registry import (
+    CandidateRegistry,
+    CapabilityRegistry,
+    RejectedRegistry,
+)
 from evolve.reporting import AuditVerifier
 from evolve.strategies import SkillPairedStrategy
 
@@ -128,13 +145,52 @@ class FakeTransport:
         self, plan: ExecutionPlan, workspace: Mapping[str, Any]
     ) -> Mapping[str, Any]:
         self.calls += 1
+        output = f"prediction:{plan.task.task_id}:{plan.arm}"
         return {
-            "output": f"prediction:{plan.task.task_id}:{plan.arm}",
+            "output": output,
+            "patch": output,
+            "patch_sha256": _sha(output),
             "workspace_id": workspace["workspace_id"],
+            "candidate_consumed": plan.arm == "taught",
+            "candidate_bundle_sha256": (
+                _spec().candidate_artifact_sha256 if plan.arm == "taught" else None
+            ),
+            "candidate_revision_id": (
+                _spec().candidate_revision_id if plan.arm == "taught" else None
+            ),
             "cost_cny": 0.1,
             "input_tokens": 10,
             "output_tokens": 5,
         }
+
+
+class E3FakeTransport(FakeTransport):
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+    def infer(
+        self, plan: ExecutionPlan, workspace: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        result = dict(super().infer(plan, workspace))
+        prediction = str(result["patch_sha256"])
+        self.root.mkdir(parents=True, exist_ok=True)
+        artifact = self.root / f"{plan.plan_id}.json"
+        artifact.write_text(
+            json.dumps({"prediction_sha256": prediction}), encoding="utf-8"
+        )
+        result.update(
+            {
+                "internal_trace": {
+                    "artifact_path": str(artifact),
+                    "artifact_sha256": hashlib.sha256(
+                        artifact.read_bytes()
+                    ).hexdigest(),
+                    "mechanism_id": "compiled-teacher-candidate-v1",
+                },
+            }
+        )
+        return result
 
 
 class FakeNativeEvaluator:
@@ -164,6 +220,19 @@ class FakeNativeEvaluator:
         }
 
 
+class E3FakeNativeEvaluator(FakeNativeEvaluator):
+    def evaluate(
+        self,
+        plan: ExecutionPlan,
+        workspace: Mapping[str, Any],
+        model_output: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        result = dict(super().evaluate(plan, workspace, model_output))
+        result["resolved"] = plan.arm == "taught"
+        result["prediction_sha256"] = model_output["patch_sha256"]
+        return result
+
+
 def _dependencies(tmp_path: Path):
     authorization = _authorization()
     checkpoints = CheckpointManager(tmp_path / "checkpoints")
@@ -182,7 +251,14 @@ def _dependencies(tmp_path: Path):
     workspace = FakeWorkspace()
     transport = FakeTransport()
     evaluator = FakeNativeEvaluator()
-    capability_registry = CapabilityRegistry(tmp_path / "capabilities.jsonl")
+    promotion_log = PromotionDecisionLog(tmp_path / "promotion-decisions.jsonl")
+    capability_registry = CapabilityRegistry(
+        tmp_path / "capabilities.jsonl", decision_log=promotion_log
+    )
+    candidate_registry = CandidateRegistry(tmp_path / "candidates.jsonl")
+    rejected_registry = RejectedRegistry(
+        tmp_path / "rejected.jsonl", decision_log=promotion_log
+    )
     return {
         "authorization": authorization,
         "checkpoints": checkpoints,
@@ -193,7 +269,10 @@ def _dependencies(tmp_path: Path):
         "workspace": workspace,
         "transport": transport,
         "evaluator": evaluator,
+        "candidate_registry": candidate_registry,
         "capability_registry": capability_registry,
+        "rejected_registry": rejected_registry,
+        "promotion_log": promotion_log,
     }
 
 
@@ -210,7 +289,12 @@ def _run(tmp_path: Path, dependencies: dict[str, Any], controller):
         receipt_store=dependencies["receipts"],
         observer_hub=dependencies["observer"],
         claim_engine=ClaimEngine(dependencies["graph"]),
+        evidence_grade_machine=EvidenceGradeMachine(dependencies["graph"]),
+        governance_service=GovernanceService(),
+        promotion_decision_log=dependencies["promotion_log"],
+        candidate_registry=dependencies["candidate_registry"],
         capability_registry=dependencies["capability_registry"],
+        rejected_registry=dependencies["rejected_registry"],
         report_root=tmp_path / "report",
         clock=lambda: NOW,
     )
@@ -267,11 +351,17 @@ def test_runtime_backed_campaign_builds_six_plans_and_projects_auditable_assets(
     assert len(dependencies["graph"].evidence_by_observer("cost-v1")) == 6
     assert len(dependencies["graph"].evidence_by_observer("external-trace-v1")) == 6
 
-    assert result.capability.active is False
-    assert result.capability.evidence_claim_ids == tuple(
+    assert result.candidate.active is False
+    assert result.candidate.source_claim_ids == tuple(
         claim.claim_id for claim in result.claims
     )
-    assert dependencies["capability_registry"].all() == (result.capability,)
+    assert dependencies["candidate_registry"].all() == (result.candidate,)
+    assert result.evidence_state.grade.value == "E2"
+    assert result.evidence_state.e3_eligible is False
+    assert result.promotion_decision.gate_decision is GateDecision.REJECTED
+    assert result.capability is None
+    assert dependencies["capability_registry"].all() == ()
+    assert dependencies["rejected_registry"].all() == (result.rejected,)
 
     snapshot = result.snapshot
     assert snapshot.status is CampaignStatus.COMPLETED
@@ -290,10 +380,20 @@ def test_runtime_backed_campaign_builds_six_plans_and_projects_auditable_assets(
         "neutral": 1,
         "regression": 1,
     }
-    assert AuditVerifier().verify_manifest(
-        result.report_paths.manifest_path,
-        root=result.report_paths.manifest_path.parent,
-    ) == 2
+    assert result.report["promotion_status"] == "rejected"
+    assert result.report["evidence_grade_reached"] == "E2"
+    assert result.report["implementation_status"] == "complete"
+    assert result.report["causal_pipeline_status"] == "validated"
+    assert result.report["empirical_gain_status"] == "regression"
+    assert result.report["full_v3_release_status"] == "incomplete"
+    assert result.report["budget_spent_cny"] == pytest.approx(0.6)
+    assert (
+        AuditVerifier().verify_manifest(
+            result.report_paths.manifest_path,
+            root=result.report_paths.manifest_path.parent,
+        )
+        == 2
+    )
 
 
 def test_terminal_checkpoint_resume_replays_without_dispatch_or_duplicate_records(
@@ -323,8 +423,79 @@ def test_terminal_checkpoint_resume_replays_without_dispatch_or_duplicate_record
     assert dependencies["graph"].claims_path.read_bytes() == claims_before
     assert checkpoint_path.read_bytes() == checkpoint_before
     assert second.report_paths.json_path.read_bytes() == report_before
-    assert len(dependencies["capability_registry"].all()) == 1
+    assert len(dependencies["candidate_registry"].all()) == 1
+    assert dependencies["capability_registry"].all() == ()
+    assert len(dependencies["rejected_registry"].all()) == 1
+    assert len(dependencies["promotion_log"].all()) == 1
     assert second.snapshot == first.snapshot
+
+
+def test_runtime_receipts_reach_e3_without_manual_evidence_injection(
+    tmp_path: Path,
+) -> None:
+    dependencies = _dependencies(tmp_path)
+    graph = dependencies["graph"]
+    observer = ObserverHub(
+        (
+            NativeOutcomeObserver(),
+            CostObserver(),
+            ExternalTraceObserver(),
+            JacobianLensObserver(),
+        ),
+        graph=graph,
+    )
+    dependencies.update(
+        {
+            "observer": observer,
+            "transport": E3FakeTransport(tmp_path / "internal-traces"),
+            "evaluator": E3FakeNativeEvaluator(),
+        }
+    )
+    original_spec = _spec()
+    spec = replace(
+        original_spec,
+        mechanism_id="compiled-teacher-candidate-v1",
+        task_execution_metadata={
+            revision_id: {
+                **metadata,
+                "mechanism_id": "compiled-teacher-candidate-v1",
+            }
+            for revision_id, metadata in original_spec.task_execution_metadata.items()
+        },
+    )
+
+    result = run_skill_paired_campaign(
+        spec=spec,
+        tasks=_tasks(),
+        strategy=SkillPairedStrategy(),
+        controller=dependencies["controller"],
+        authorization=dependencies["authorization"],
+        model_transport=dependencies["transport"],
+        workspace_manager=dependencies["workspace"],
+        native_evaluator=dependencies["evaluator"],
+        receipt_store=dependencies["receipts"],
+        observer_hub=dependencies["observer"],
+        claim_engine=ClaimEngine(graph),
+        evidence_grade_machine=EvidenceGradeMachine(graph),
+        governance_service=GovernanceService(),
+        promotion_decision_log=dependencies["promotion_log"],
+        candidate_registry=dependencies["candidate_registry"],
+        capability_registry=dependencies["capability_registry"],
+        rejected_registry=dependencies["rejected_registry"],
+        report_root=tmp_path / "report",
+        clock=lambda: NOW,
+    )
+
+    assert result.evidence_state.grade.value == "E3"
+    assert result.evidence_state.e3_eligible is True
+    assert result.evidence_state.prediction_consistent_task_count == 3
+    assert len(graph.evidence_by_observer("external-trace-v1")) == 6
+    assert len(graph.evidence_by_observer("jlens-v1")) == 6
+    assert (
+        result.promotion_decision.gate_decision is GateDecision.HUMAN_APPROVAL_REQUIRED
+    )
+    assert result.capability is None
+    assert dependencies["capability_registry"].all() == ()
 
 
 def test_non_feedback_input_is_denied_before_campaign_or_adapter_mutation(
@@ -347,7 +518,12 @@ def test_non_feedback_input_is_denied_before_campaign_or_adapter_mutation(
             receipt_store=dependencies["receipts"],
             observer_hub=dependencies["observer"],
             claim_engine=ClaimEngine(dependencies["graph"]),
+            evidence_grade_machine=EvidenceGradeMachine(dependencies["graph"]),
+            governance_service=GovernanceService(),
+            promotion_decision_log=dependencies["promotion_log"],
+            candidate_registry=dependencies["candidate_registry"],
             capability_registry=dependencies["capability_registry"],
+            rejected_registry=dependencies["rejected_registry"],
             report_root=tmp_path / "report",
             clock=lambda: NOW,
         )

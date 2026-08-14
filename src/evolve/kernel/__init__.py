@@ -1,6 +1,14 @@
 """Neutral Campaign lifecycle, authorization, budget, lease, and resume APIs."""
 
-from .budget_manager import BudgetExceeded, BudgetManager, BudgetSnapshot
+from .budget_manager import (
+    BudgetExceeded,
+    BudgetManager,
+    BudgetSnapshot,
+    DurableCostLedger,
+    LedgerBusy,
+    LedgerConflict,
+    LedgerIntegrityError,
+)
 from .campaign_controller import (
     CampaignController,
     CampaignSnapshot,
@@ -14,6 +22,10 @@ __all__ = [
     "BudgetExceeded",
     "BudgetManager",
     "BudgetSnapshot",
+    "DurableCostLedger",
+    "LedgerBusy",
+    "LedgerConflict",
+    "LedgerIntegrityError",
     "CampaignController",
     "CampaignSnapshot",
     "CampaignStatus",

@@ -12,6 +12,9 @@
 | Local Qwen operator/span execution | `LegacyQwenPairTransport` behind `ExecutionRuntime` | live compatibility transport |
 | Official SWE-bench invocation | `LegacyOfficialNativeEvaluator` behind `ExecutionRuntime` | live compatibility evaluator |
 | Mutable task checkout selection | `FrozenSourceWorkspaceManager` | replaced with clean, exact-revision admission |
+| Frozen taught Skill selection | `CandidateCompiler` + compiled Skill/Operator/Router | replaced; no live fallback |
+| In-memory Teacher `_spent_cny` | `DurableCostLedger` | replaced for new calls and replay |
+| Direct Capability append | `GovernanceService` + `PromotionDecisionLog` | rejected by authoritative registry |
 
 ## One live authority path
 
@@ -23,6 +26,14 @@ plans to the neutral Kernel and dispatches every plan through `ExecutionRuntime`
 The Runtime emits model, external trace, cost, native and terminal Receipts. The
 Observer Hub emits Evidence; alignment and Claim Engine classify the three
 matched pairs; registries accept only inactive revisions.
+
+The Teacher request and response are copied byte-for-byte into a self-contained
+compiled revision. The baseline branch does not read that revision; the taught
+branch revalidates every compiled artifact and consumes its Skill, Operator and
+Router. Strict native pairs become E2 claims. E3 additionally requires repeated
+cross-project gains and matching external/JLens prediction evidence. Candidate,
+Rejected and Capability registries are separate: only a decision-log-backed,
+human-approved E3 decision may create a Capability, still inactive by default.
 
 The CLI rejects non-feedback tasks, source revision drift, dirty checkouts,
 evaluator/model hash drift, a config not bound to the current Git commit, and

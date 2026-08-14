@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +14,14 @@ from evolve.contracts import (
     ModelIdentity,
     TaskRevision,
 )
-from evolve.runtime.qwen_transport import LegacyQwenPairTransport
+from evolve.proposals import (
+    CandidateChangeSet,
+    CompiledOperator,
+    CompiledRevision,
+    CompiledRouter,
+    CompiledSkill,
+)
+from evolve.runtime.qwen_transport import LegacyQwenCellRunner, LegacyQwenPairTransport
 
 SHA = "a" * 64
 
@@ -69,7 +78,9 @@ class RecordingCellRunner:
         }
 
 
-def test_qwen_transport_dispatches_each_feedback_arm_through_cell_runner(tmp_path) -> None:
+def test_qwen_transport_dispatches_each_feedback_arm_through_cell_runner(
+    tmp_path,
+) -> None:
     runner = RecordingCellRunner()
     transport = LegacyQwenPairTransport(cell_runner=runner, output_root=tmp_path)
     workspace = {
@@ -85,10 +96,11 @@ def test_qwen_transport_dispatches_each_feedback_arm_through_cell_runner(tmp_pat
     assert output["plan_id"] == "plan-baseline"
     assert output["task_revision_id"] == "feedback-sphinx-7757-v1"
     assert output["task_source_sha256"] == SHA
-    assert output["patch_sha256"] == "58796596d75205da0ff5f87d83bc169e9ec91b6f6a6c21cbd47af71bf79be2b0"
-    assert runner.calls == [
-        ("plan-baseline", "baseline", "feedback-sphinx-7757-v1")
-    ]
+    assert (
+        output["patch_sha256"]
+        == "58796596d75205da0ff5f87d83bc169e9ec91b6f6a6c21cbd47af71bf79be2b0"
+    )
+    assert runner.calls == [("plan-baseline", "baseline", "feedback-sphinx-7757-v1")]
 
 
 def test_qwen_transport_fails_closed_on_task_or_arm_drift(tmp_path) -> None:
@@ -116,3 +128,135 @@ def test_qwen_transport_fails_closed_on_task_or_arm_drift(tmp_path) -> None:
                 "checkout": "/tmp/source",
             },
         )
+
+
+def test_legacy_runner_baseline_does_not_read_candidate_and_taught_fails_closed(
+    tmp_path: Path,
+) -> None:
+    legacy_root = tmp_path / "legacy"
+    model_root = tmp_path / "model"
+    legacy_root.mkdir()
+    model_root.mkdir()
+    taskset = tmp_path / "TASKSET.json"
+    routes = tmp_path / "ROUTES.json"
+    taskset.write_text('{"tasks": []}\n', encoding="utf-8")
+    routes.write_text('{"routes": {}}\n', encoding="utf-8")
+    missing_candidate = tmp_path / "compiled-candidate"
+    runner = LegacyQwenCellRunner(
+        legacy_root=legacy_root,
+        model_path=model_root,
+        taskset_path=taskset,
+        routes_path=routes,
+        compiled_revision_root=missing_candidate,
+    )
+
+    assert runner._compiled_for_plan(_plan(arm="baseline")) is None
+    assert not missing_candidate.exists()
+
+    with pytest.raises(ContractViolation, match="compiled revision manifest"):
+        runner._compiled_for_plan(_plan(arm="taught"))
+
+
+def _compiled(tmp_path: Path, skill_text: str) -> CompiledRevision:
+    change_set = CandidateChangeSet(
+        candidate_id="candidate-live",
+        revision_id="candidate-taught",
+        parent_revision_id="baseline-r1",
+        source_candidate_sha256=hashlib.sha256(skill_text.encode()).hexdigest(),
+        compile_spec_sha256="b" * 64,
+        protocol="inactive_external_agent",
+        prompt_template="Return one deterministic plan.",
+        skill_text=skill_text,
+        eval_note="Evaluate with matched native A/B.",
+        operator_id="operator-live",
+        operator_instruction="Apply the compiled teaching.",
+        routes=(("sphinx-doc__sphinx-7757", "operator-live"),),
+    )
+    return CompiledRevision(
+        root=tmp_path,
+        change_set=change_set,
+        skill=CompiledSkill(
+            candidate_id=change_set.candidate_id,
+            revision_id=change_set.revision_id,
+            parent_revision_id=change_set.parent_revision_id,
+            protocol=change_set.protocol,
+            prompt_template=change_set.prompt_template,
+            skill_text=change_set.skill_text,
+        ),
+        operator=CompiledOperator(
+            candidate_id=change_set.candidate_id,
+            revision_id=change_set.revision_id,
+            operator_id=change_set.operator_id,
+            kind="zero-arg",
+            arguments=(),
+            instruction=change_set.operator_instruction,
+        ),
+        router=CompiledRouter(
+            candidate_id=change_set.candidate_id,
+            revision_id=change_set.revision_id,
+            routes=change_set.routes,
+        ),
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        cost_cny=0.001,
+        artifact_sha256=(),
+        manifest_path=tmp_path / "COMPILED-REVISION.json",
+        bundle_sha256=hashlib.sha256(skill_text.encode()).hexdigest(),
+    )
+
+
+def test_legacy_condition_prompt_changes_only_for_taught_candidate_content(
+    tmp_path: Path,
+) -> None:
+    class Adapter:
+        @staticmethod
+        def experiment_config():
+            return {"temperature": 0}
+
+    def builder(*, taught_skill: str, **_kwargs):
+        return (
+            SimpleNamespace(
+                mechanism="operator",
+                teaching="baseline",
+                revision=hashlib.sha256(b"baseline-no-candidate").hexdigest(),
+            ),
+            SimpleNamespace(
+                mechanism="operator",
+                teaching="taught",
+                revision=hashlib.sha256(taught_skill.encode()).hexdigest(),
+            ),
+        )
+
+    first = _compiled(tmp_path / "first", "Preserve exact declarations.")
+    second = _compiled(tmp_path / "second", "Preserve exact field declarations.")
+    baseline_first = LegacyQwenCellRunner._condition_for_plan(
+        plan=_plan(arm="baseline"),
+        mechanism="operator",
+        adapter=Adapter(),
+        compiled=first,
+        builder=builder,
+    )
+    baseline_second = LegacyQwenCellRunner._condition_for_plan(
+        plan=_plan(arm="baseline"),
+        mechanism="operator",
+        adapter=Adapter(),
+        compiled=second,
+        builder=builder,
+    )
+    taught_first = LegacyQwenCellRunner._condition_for_plan(
+        plan=_plan(arm="taught"),
+        mechanism="operator",
+        adapter=Adapter(),
+        compiled=first,
+        builder=builder,
+    )
+    taught_second = LegacyQwenCellRunner._condition_for_plan(
+        plan=_plan(arm="taught"),
+        mechanism="operator",
+        adapter=Adapter(),
+        compiled=second,
+        builder=builder,
+    )
+
+    assert baseline_first.revision == baseline_second.revision
+    assert taught_first.revision != taught_second.revision

@@ -70,7 +70,11 @@ class ClaimEngine:
         claim = Claim(
             claim_id=f"claim-{identity}",
             candidate_id=candidate_id,
-            grade=ClaimGrade.E1,
+            grade=(
+                ClaimGrade.E1
+                if classification is ClaimClassification.INFRA_FAILURE
+                else ClaimGrade.E2
+            ),
             classification=classification,
             evidence_ids=evidence_ids,
             rationale=rationale,

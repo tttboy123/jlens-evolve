@@ -6,18 +6,21 @@ import dataclasses
 import json
 import os
 from pathlib import Path
-from typing import Generic, TypeVar
+from typing import Any, Generic, Protocol, TypeVar
 
-from evolve.contracts import canonical_json
+from evolve.contracts import ClaimGrade, canonical_json, content_sha256
 
 from .records import (
     AgentProgramRecord,
     CandidateRecord,
     CapabilityRecord,
     RegistryViolation,
+    RejectedRecord,
 )
 
-RecordT = TypeVar("RecordT", CandidateRecord, CapabilityRecord, AgentProgramRecord)
+RecordT = TypeVar(
+    "RecordT", CandidateRecord, CapabilityRecord, RejectedRecord, AgentProgramRecord
+)
 
 
 class RegistryConflict(RegistryViolation):
@@ -26,6 +29,10 @@ class RegistryConflict(RegistryViolation):
 
 class RegistryBusy(RegistryViolation):
     """Another writer currently owns the registry lease."""
+
+
+class DecisionReader(Protocol):
+    def all(self) -> tuple[Any, ...]: ...
 
 
 class _AppendOnlyRegistry(Generic[RecordT]):
@@ -89,6 +96,11 @@ class _AppendOnlyRegistry(Generic[RecordT]):
             try:
                 payload = json.loads(line)
                 expected_hash = payload.pop("record_sha256")
+                legacy_capability = (
+                    self.record_type is CapabilityRecord
+                    and "promotion_decision_id" not in payload
+                )
+                legacy_payload = dict(payload) if legacy_capability else None
                 for field in dataclasses.fields(self.record_type):
                     if field.name in payload and field.name.endswith("_ids"):
                         payload[field.name] = tuple(payload[field.name])
@@ -97,7 +109,10 @@ class _AppendOnlyRegistry(Generic[RecordT]):
                 raise RegistryViolation(
                     f"invalid registry entry at {self.path}:{line_number}"
                 ) from error
-            if record.content_sha256 != expected_hash:
+            valid_hashes = {record.content_sha256}
+            if legacy_payload is not None:
+                valid_hashes.add(content_sha256(legacy_payload))
+            if expected_hash not in valid_hashes:
                 raise RegistryViolation(
                     f"registry hash mismatch at {self.path}:{line_number}"
                 )
@@ -112,6 +127,59 @@ class CandidateRegistry(_AppendOnlyRegistry[CandidateRecord]):
 class CapabilityRegistry(_AppendOnlyRegistry[CapabilityRecord]):
     record_type = CapabilityRecord
 
+    def __init__(
+        self, path: str | Path, *, decision_log: DecisionReader | None = None
+    ) -> None:
+        super().__init__(path)
+        self._decision_log = decision_log
+
+    def append(self, record: CapabilityRecord) -> bool:
+        if record.promotion_decision_id is None or record.source_candidate_id is None:
+            raise RegistryViolation(
+                "authoritative capability writes require promotion decision identity"
+            )
+        decision = _decision_for(self._decision_log, record.promotion_decision_id)
+        if (
+            str(decision.gate_decision) != "approved"
+            or decision.evidence_grade is not ClaimGrade.E3
+            or not decision.prediction_evidence_ids
+            or decision.candidate_id != record.source_candidate_id
+            or decision.candidate_revision_id != record.revision_id
+            or set(decision.claim_ids) != set(record.evidence_claim_ids)
+        ):
+            raise RegistryViolation("capability promotion decision identity mismatch")
+        return super().append(record)
+
+
+class RejectedRegistry(_AppendOnlyRegistry[RejectedRecord]):
+    record_type = RejectedRecord
+
+    def __init__(
+        self, path: str | Path, *, decision_log: DecisionReader | None = None
+    ) -> None:
+        super().__init__(path)
+        self._decision_log = decision_log
+
+    def append(self, record: RejectedRecord) -> bool:
+        decision = _decision_for(self._decision_log, record.promotion_decision_id)
+        if (
+            str(decision.gate_decision) != "rejected"
+            or decision.candidate_id != record.candidate_id
+            or decision.candidate_revision_id != record.revision_id
+            or set(decision.claim_ids) != set(record.evidence_claim_ids)
+        ):
+            raise RegistryViolation("rejected promotion decision identity mismatch")
+        return super().append(record)
+
 
 class AgentProgramRegistry(_AppendOnlyRegistry[AgentProgramRecord]):
     record_type = AgentProgramRecord
+
+
+def _decision_for(reader: DecisionReader | None, decision_id: str) -> Any:
+    if reader is None:
+        raise RegistryViolation("authoritative registry requires a decision log")
+    matches = [item for item in reader.all() if item.decision_id == decision_id]
+    if len(matches) != 1:
+        raise RegistryViolation("promotion decision is missing or ambiguous")
+    return matches[0]

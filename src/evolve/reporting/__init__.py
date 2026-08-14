@@ -91,6 +91,13 @@ class CampaignReportProjector:
             f"- Claims: {report['claim_count']}\n"
             f"- API spend (CNY): {report['actual_api_spend_cny']}\n"
             f"- Classifications: `{canonical_json(report['counts'])}`\n"
+            f"- Implementation: `{report.get('implementation_status', 'unknown')}`\n"
+            f"- Causal pipeline: `{report.get('causal_pipeline_status', 'unknown')}`\n"
+            f"- Empirical gain: `{report.get('empirical_gain_status', 'unknown')}`\n"
+            f"- Evidence grade: `{report.get('evidence_grade_reached', 'unknown')}`\n"
+            f"- Promotion: `{report.get('promotion_status', 'unknown')}`\n"
+            f"- Full v3 release: `{report.get('full_v3_release_status', 'unknown')}`\n"
+            f"- Unresolved findings: `{canonical_json(report.get('unresolved_findings', []))}`\n"
         )
         _atomic_write(markdown_path, markdown.encode())
         entries = [

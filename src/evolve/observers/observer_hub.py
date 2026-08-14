@@ -11,7 +11,8 @@ from evolve.evidence.evidence_graph import EvidenceGraph
 
 
 class Observer(Protocol):
-    observer_id: str
+    @property
+    def observer_id(self) -> str: ...
 
     def observe(self, receipt: Receipt) -> EvidenceEnvelope | None: ...
 

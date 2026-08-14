@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from evolve.contracts import Cohort, ContractViolation, ExecutionPlan, canonical_json
+from evolve.proposals import CompiledRevision
+
+from .candidate_prompt import compiled_candidate_prompt
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -74,14 +77,16 @@ class LegacyQwenPairTransport:
         if not required <= result.keys():
             raise ContractViolation("Qwen cell result is incomplete")
         patch = result["patch"]
-        if not isinstance(patch, str) or _sha256_bytes(patch.encode()) != result[
-            "patch_sha256"
-        ]:
+        if (
+            not isinstance(patch, str)
+            or _sha256_bytes(patch.encode()) != result["patch_sha256"]
+        ):
             raise ContractViolation("Qwen patch identity mismatch")
         raw_path = Path(str(result["raw_output_path"])).resolve()
-        if not raw_path.is_file() or _sha256_file(raw_path) != result[
-            "raw_output_sha256"
-        ]:
+        if (
+            not raw_path.is_file()
+            or _sha256_file(raw_path) != result["raw_output_sha256"]
+        ):
             raise ContractViolation("Qwen raw output identity mismatch")
         prompt_paths = result["prompt_paths"]
         prompt_hashes = result["prompt_sha256"]
@@ -115,30 +120,26 @@ class LegacyQwenCellRunner:
         model_path: Path,
         taskset_path: Path,
         routes_path: Path,
-        operator_skill_path: Path,
-        span_skill_path: Path,
+        compiled_revision_root: Path,
     ) -> None:
         self.legacy_root = legacy_root.resolve()
         self.model_path = model_path.resolve()
         self.taskset_path = taskset_path.resolve()
         self.routes_path = routes_path.resolve()
-        self.operator_skill_path = operator_skill_path.resolve()
-        self.span_skill_path = span_skill_path.resolve()
+        # Store only the path here. Baseline execution must not read, hash, or
+        # deserialize candidate content; taught execution loads it fail-closed.
+        self.compiled_revision_root = compiled_revision_root.resolve()
         for path in (
             self.legacy_root,
             self.model_path,
             self.taskset_path,
             self.routes_path,
-            self.operator_skill_path,
-            self.span_skill_path,
         ):
             if not path.exists():
                 raise ContractViolation(f"legacy Qwen input is missing: {path}")
         self._input_sha256 = {
             "taskset": _sha256_file(self.taskset_path),
             "routes": _sha256_file(self.routes_path),
-            "operator_skill": _sha256_file(self.operator_skill_path),
-            "span_skill": _sha256_file(self.span_skill_path),
         }
         taskset = json.loads(self.taskset_path.read_text(encoding="utf-8"))
         routes = json.loads(self.routes_path.read_text(encoding="utf-8"))
@@ -165,9 +166,6 @@ class LegacyQwenCellRunner:
                 MlxOperatorPlanGenerator,
                 OperatorPlanAdapter,
                 build_operator_conditions,
-            )
-            from skill_evolution_loop.p1_operator import (
-                load_frozen_operator_skill_revision,
             )
             from skill_evolution_loop.span_student import (
                 MlxSpanPlanGenerator,
@@ -202,35 +200,12 @@ class LegacyQwenCellRunner:
             "operator": OperatorPlanAdapter(generator=operator_generator),
             "span": SpanPlanAdapter(generator=span_generator),
         }
-        operator_revision = load_frozen_operator_skill_revision(
-            self.operator_skill_path
-        )
-        span_wrapper = json.loads(self.span_skill_path.read_text(encoding="utf-8"))
-        if (
-            span_wrapper.get("candidate_status") != "inactive"
-            or span_wrapper.get("auto_activate") is not False
-        ):
-            raise ContractViolation("legacy span Skill is not inactive")
-        conditions = [
-            *build_operator_conditions(
-                taught_skill=operator_revision.skill_text,
-                parent_revision_id=operator_revision.revision_id,
-                source_round=operator_revision.source_round,
-                generation_config=adapters["operator"].experiment_config(),
-            ),
-            *build_span_conditions(
-                taught_skill=str(span_wrapper["skill_text"]),
-                parent_revision_id=operator_revision.revision_id,
-                source_round=operator_revision.source_round,
-                generation_config=adapters["span"].experiment_config(),
-            ),
-        ]
-        condition_index = {
-            (row.mechanism, row.teaching): row for row in conditions
-        }
         self._runtime = {
             "adapters": adapters,
-            "conditions": condition_index,
+            "condition_builders": {
+                "operator": build_operator_conditions,
+                "span": build_span_conditions,
+            },
             "generators": {
                 "operator": operator_generator,
                 "span": span_generator,
@@ -247,17 +222,9 @@ class LegacyQwenCellRunner:
         current_input_sha256 = {
             "taskset": _sha256_file(self.taskset_path),
             "routes": _sha256_file(self.routes_path),
-            "operator_skill": _sha256_file(self.operator_skill_path),
-            "span_skill": _sha256_file(self.span_skill_path),
         }
         if current_input_sha256 != self._input_sha256:
             raise ContractViolation("frozen Qwen input artifact drift")
-        candidate_bundle_sha256 = plan.metadata.get("candidate_bundle_sha256")
-        if (
-            not isinstance(candidate_bundle_sha256, str)
-            or len(candidate_bundle_sha256) != 64
-        ):
-            raise ContractViolation("Qwen plan candidate bundle identity is missing")
         task_row = self._tasks.get(plan.task.task_id)
         if task_row is None:
             raise ContractViolation("Qwen task is not in the frozen feedback catalog")
@@ -275,13 +242,17 @@ class LegacyQwenCellRunner:
         checkout = Path(str(workspace.get("checkout", ""))).resolve()
         if not checkout.is_dir():
             raise ContractViolation("Qwen workspace checkout is missing")
+        compiled = self._compiled_for_plan(plan)
         identity = {
             "plan_sha256": plan.content_sha256,
             "workspace_source_sha256": workspace.get("task_source_sha256"),
             "legacy_task_id": legacy_task_id,
             "mechanism": mechanism,
-            "candidate_bundle_sha256": candidate_bundle_sha256,
             "qwen_input_sha256": self._input_sha256,
+            "candidate_consumed": compiled is not None,
+            "candidate_bundle_sha256": (
+                compiled.bundle_sha256 if compiled is not None else None
+            ),
         }
         target = output_root.resolve() / plan.plan_id
         if target.exists():
@@ -297,8 +268,14 @@ class LegacyQwenCellRunner:
             allowed_targets=[str(item) for item in task_row["allowed_targets"]],
             cohort="feedback",
         )
-        condition = runtime["conditions"][(mechanism, plan.arm)]
         adapter = runtime["adapters"][mechanism]
+        condition = self._condition_for_plan(
+            plan=plan,
+            mechanism=mechanism,
+            adapter=adapter,
+            compiled=compiled,
+            builder=runtime["condition_builders"][mechanism],
+        )
         started = time.monotonic()
         attempt = adapter.run(student_task, condition.revision)
         elapsed = time.monotonic() - started
@@ -342,6 +319,16 @@ class LegacyQwenCellRunner:
                 "elapsed_seconds": round(elapsed, 6),
                 "mechanism": mechanism,
                 "condition_id": condition.condition_id,
+                "candidate_consumed": compiled is not None,
+                "candidate_bundle_sha256": (
+                    compiled.bundle_sha256 if compiled is not None else None
+                ),
+                "candidate_revision_id": (
+                    compiled.change_set.revision_id if compiled is not None else None
+                ),
+                "compiled_artifact_sha256": (
+                    dict(compiled.artifact_sha256) if compiled is not None else {}
+                ),
                 "model_identity_sha256": self._model_identity(),
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -364,6 +351,57 @@ class LegacyQwenCellRunner:
                         path.rmdir()
                 temporary.rmdir()
         return self._load_frozen_result(target, identity)
+
+    def _compiled_for_plan(self, plan: ExecutionPlan) -> CompiledRevision | None:
+        if plan.arm == "baseline":
+            return None
+        if plan.arm != "taught":
+            raise ContractViolation("local Qwen runner requires paired arms")
+        compiled = CompiledRevision.load(self.compiled_revision_root)
+        if plan.candidate_revision_id != compiled.change_set.revision_id:
+            raise ContractViolation("taught plan candidate revision mismatch")
+        route = dict(compiled.router.routes).get(plan.task.task_id)
+        if route is None:
+            raise ContractViolation("compiled Router has no route for taught task")
+        if route != compiled.operator.operator_id:
+            raise ContractViolation("compiled Router selected another Operator")
+        return compiled
+
+    @staticmethod
+    def _condition_for_plan(
+        *,
+        plan: ExecutionPlan,
+        mechanism: str,
+        adapter: Any,
+        compiled: CompiledRevision | None,
+        builder: Any,
+    ) -> Any:
+        if plan.arm == "baseline":
+            # The builder requires a taught value even when selecting the
+            # baseline row. This fixed sentinel is not candidate-derived.
+            teaching = "BASELINE-SENTINEL-NOT-CANDIDATE-DERIVED"
+            parent_revision_id = "baseline-no-candidate"
+        else:
+            if compiled is None:
+                raise ContractViolation("taught execution requires compiled candidate")
+            teaching = compiled_candidate_prompt(compiled, plan.task.task_id)
+            parent_revision_id = compiled.change_set.parent_revision_id
+        conditions = builder(
+            taught_skill=teaching,
+            parent_revision_id=parent_revision_id,
+            source_round=0,
+            generation_config=adapter.experiment_config(),
+        )
+        try:
+            return next(
+                row
+                for row in conditions
+                if row.mechanism == mechanism and row.teaching == plan.arm
+            )
+        except StopIteration as error:
+            raise ContractViolation(
+                "legacy condition builder omitted paired arm"
+            ) from error
 
     def _model_identity(self) -> dict[str, str]:
         names = (
@@ -415,6 +453,10 @@ class LegacyQwenCellRunner:
             "failure_reason": frozen.get("failure_reason"),
             "mechanism": frozen["mechanism"],
             "condition_id": frozen["condition_id"],
+            "candidate_consumed": bool(frozen["candidate_consumed"]),
+            "candidate_bundle_sha256": frozen.get("candidate_bundle_sha256"),
+            "candidate_revision_id": frozen.get("candidate_revision_id"),
+            "compiled_artifact_sha256": frozen.get("compiled_artifact_sha256", {}),
             "model_identity_sha256": frozen["model_identity_sha256"],
             "input_tokens": int(frozen["input_tokens"]),
             "output_tokens": int(frozen["output_tokens"]),

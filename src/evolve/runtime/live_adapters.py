@@ -343,7 +343,10 @@ class LegacyOfficialNativeEvaluator:
             raise EvaluatorInfrastructureError("legacy source root is missing")
         with _prepend_import_path(self.legacy_root):
             module = importlib.import_module(name)
-        module_path = Path(module.__file__).resolve()
+        raw_module_path = getattr(module, "__file__", None)
+        if not isinstance(raw_module_path, str):
+            raise EvaluatorInfrastructureError("legacy module path is missing")
+        module_path = Path(raw_module_path).resolve()
         if not module_path.is_relative_to(self.legacy_root):
             raise EvaluatorInfrastructureError("legacy module identity drift")
         return module

@@ -2,6 +2,7 @@
 
 from .claim_engine import ClaimEngine
 from .evidence_graph import EvidenceGraph
+from .grade_machine import CandidateEvidenceState, EvidenceGradeMachine
 from .receipt_store import (
     ConcurrentWriterError,
     IntegrityError,
@@ -12,6 +13,8 @@ from .receipt_store import (
 __all__ = [
     "ConcurrentWriterError",
     "ClaimEngine",
+    "CandidateEvidenceState",
+    "EvidenceGradeMachine",
     "IntegrityError",
     "EvidenceGraph",
     "ReceiptConflict",

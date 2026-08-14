@@ -5,6 +5,7 @@ from .records import (
     CandidateRecord,
     CapabilityRecord,
     RegistryViolation,
+    RejectedRecord,
 )
 from .store import (
     AgentProgramRegistry,
@@ -12,6 +13,7 @@ from .store import (
     CapabilityRegistry,
     RegistryBusy,
     RegistryConflict,
+    RejectedRegistry,
 )
 
 __all__ = [
@@ -21,6 +23,8 @@ __all__ = [
     "CandidateRegistry",
     "CapabilityRecord",
     "CapabilityRegistry",
+    "RejectedRecord",
+    "RejectedRegistry",
     "RegistryBusy",
     "RegistryConflict",
     "RegistryViolation",
