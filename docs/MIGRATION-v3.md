@@ -8,7 +8,7 @@
 | Round reports as truth | receipts + claims, projected by `evolve.reporting` | replaced |
 | First-generation replay | `LegacyImportStrategy` | read-only compatibility facade; LIVE for import only |
 | Third-generation paired Skill A/B | `SkillPairedStrategy` | LIVE native campaign |
-| Second-generation tournaments | `AgentProgramSearchStrategy` | fixture profile LIVE; non-fixture `not-yet-live` |
+| Second-generation tournaments | `AgentProgramSearchStrategy` | fixture CLI LIVE; non-fixture library/runtime seam LIVE; public executor config not yet exposed |
 | Cross-strategy capability-gap scheduling | Portfolio Orchestrator + `CapabilityGap` | TARGET; not implemented |
 | Local Qwen operator/span execution | `LegacyQwenPairTransport` behind `ExecutionRuntime` | live compatibility transport |
 | Official SWE-bench invocation | `LegacyOfficialNativeEvaluator` behind `ExecutionRuntime` | live compatibility evaluator |
@@ -80,9 +80,14 @@ equivalence is independently demonstrated.
   official native evaluation.
 - **Legacy:** LIVE only as a read-only compatibility import. It does not mint
   current native Claims or become the autonomous parent authority.
-- **AgentProgram:** LIVE only with deterministic `execution_profile=fixture`.
-  Fixture results remain inactive and explicitly ineligible for native gain or
-  promotion claims. Non-fixture execution is `not-yet-live`.
+- **AgentProgram:** the public CLI remains the deterministic
+  `execution_profile=fixture` facade. A non-fixture library/runtime seam is LIVE
+  through `AgentProgramSearchStrategy(execution_profile="live")` plus
+  `HashVerifiedAgentProgramTransport` and an injected executor. It verifies the
+  full Program revision and replays ReceiptStore plus EvidenceGraph before
+  accepting externally produced Claims for a hash-bound tournament decision,
+  but does not mint Claims, promote, activate, or provide a public executor
+  configuration.
 - **Portfolio closure:** automatic `CapabilityGap` production, portfolio
   scheduling, and feeding validated local capabilities into a non-fixture
   AgentProgram tournament remain TARGET architecture.

@@ -1,6 +1,6 @@
 # v3.0 Dynamic Evolution Flow
 
-该动态图把当前可执行的 autonomous Skill round 与未来跨策略闭环放在同一视图。`[LIVE]` 步骤由当前代码支持；`[TARGET]` 步骤仅描述目标架构，当前没有自动 `CapabilityGap`、Portfolio Orchestrator 或 non-fixture AgentProgram 执行路径。
+该动态图把当前可执行的 autonomous Skill round 与未来跨策略闭环放在同一视图。`[LIVE]` 步骤由当前代码支持；`[TARGET]` 步骤仅描述目标架构。当前已有注入式 non-fixture AgentProgram library/runtime seam，但没有自动 `CapabilityGap`、Portfolio Orchestrator 或公开 non-fixture executor 配置。
 
 ```mermaid
 C4Dynamic
@@ -20,7 +20,7 @@ C4Dynamic
   Container(gap, "[TARGET] CapabilityGap", "Not implemented", "Would scope a reusable failure-derived capability need")
   Container(portfolio, "[TARGET] Portfolio Orchestrator", "Not implemented", "Would schedule cross-strategy research")
   Container(localResearch, "[TARGET] Local Capability Research", "Planned Skill campaign", "Would validate an inactive Skill or Operator")
-  Container(program, "[TARGET] Non-fixture AgentProgram Tournament", "Not implemented", "Would compose validated components and produce new evidence")
+  Container(program, "[LIVE API] Non-fixture AgentProgram Tournament", "Injected executor seam", "Verifies complete revisions and runs participants through ExecutionRuntime; no public executor config")
 
   Rel(operator, cli, "[LIVE 1] Supplies explicit authorization and run configuration", "CLI")
   Rel(cli, runner, "[LIVE 2] Starts or resumes autonomous Skill evolution", "In-process call")
@@ -37,8 +37,8 @@ C4Dynamic
   Rel(gap, portfolio, "[TARGET 12] Queues scoped capability research", "Planned protocol")
   Rel(portfolio, localResearch, "[TARGET 13] Starts matched local validation", "Planned campaign")
   Rel(localResearch, portfolio, "[TARGET 14] Returns a validated inactive component", "Planned registry event")
-  Rel(portfolio, program, "[TARGET 15] Resumes a non-fixture tournament with that component", "Planned campaign")
-  Rel(program, evidence, "[TARGET 16] Produces official evidence and new failure facts", "Planned receipts")
+  Rel(portfolio, program, "[TARGET 15] Automatically resumes a live tournament with that component", "Planned campaign")
+  Rel(program, evidence, "[LIVE API 16] ExecutionRuntime produces receipts; external authority supplies Claims", "Injected integration")
 ```
 
 ## 当前 LIVE 链路
@@ -68,4 +68,4 @@ verified failure evidence
 → CapabilityGap (next iteration)
 ```
 
-这个闭环目前尚未实现。当前 AgentProgram 仅支持显式 `execution_profile=fixture`：它可验证 revision/search-parent 机制，但不声明 native gain，也不具备 promotion eligibility。Legacy 仅是只读兼容导入。已准入执行产生的失败事实会作为 hash-bound receipts 保留；在准入前被拒绝的输入 fail closed，不伪造执行 Receipt。
+这个自动闭环目前尚未实现。公共 AgentProgram CLI 仍仅支持显式 `execution_profile=fixture`。应用集成可使用 `execution_profile=live`、`HashVerifiedAgentProgramTransport` 和注入 executor：完整 revision 经 hash 校验后通过 `ExecutionRuntime` 执行，search-parent 只消费外部 E1+ Claims，且不声明 promotion 或自动激活。Legacy 仅是只读兼容导入。已准入执行产生的失败事实会作为 hash-bound receipts 保留；在准入前被拒绝的输入 fail closed，不伪造执行 Receipt。

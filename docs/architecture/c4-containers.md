@@ -18,12 +18,12 @@ C4Container
     Container(autonomousRunner, "[LIVE] Autonomous Skill Runner", "Python module", "Selects feedback tasks, proposes inactive revisions, seals rounds and resumes from accepted parents")
     Container(kernel, "[LIVE] Campaign Kernel", "Python runtime", "Checks authorization and lifecycle boundaries")
     Container(execution, "[LIVE] Execution Runtime", "Python runtime", "Executes bounded model, trace and evaluator plans")
-    Container(strategyHost, "[LIVE] Strategy Host", "Python strategies", "Runs Legacy import, Skill paired campaigns and fixture AgentProgram search")
+    Container(strategyHost, "[LIVE] Strategy Host", "Python strategies", "Runs Legacy import, Skill paired campaigns, fixture CLI and injected non-fixture AgentProgram execution")
     Container(evidence, "[LIVE] Evidence and Governance Modules", "Python modules", "Builds evidence graphs, verifies Claims and applies gates")
     ContainerDb(receiptStore, "[LIVE] Receipt and Artifact Store", "Append-only files", "Stores hash-bound runtime facts, Claims and sealed manifests")
     ContainerDb(registries, "[LIVE] Versioned Registries", "JSONL projections", "Stores inactive Skills, capabilities and fixture AgentProgram revisions")
     Container(capabilityGap, "[TARGET] CapabilityGap Queue", "Not implemented", "Would turn verified failure evidence into schedulable local capability gaps")
-    Container(portfolio, "[TARGET] Portfolio Orchestrator", "Not implemented", "Would coordinate gap research and non-fixture AgentProgram tournaments")
+    Container(portfolio, "[TARGET] Portfolio Orchestrator", "Not implemented", "Would automatically coordinate gap research and live AgentProgram tournaments")
   }
 
   Rel(operator, productCli, "Starts authorized runs and inspects results", "CLI")
@@ -45,7 +45,7 @@ C4Container
   Rel(capabilityGap, portfolio, "[TARGET] Queues capability research", "Planned protocol")
   Rel(portfolio, strategyHost, "[TARGET] Schedules a local Skill campaign", "Planned protocol")
   Rel(registries, portfolio, "[TARGET] Returns a validated inactive component", "Planned protocol")
-  Rel(portfolio, strategyHost, "[TARGET] Resumes a non-fixture AgentProgram tournament", "Planned protocol")
+  Rel(portfolio, strategyHost, "[TARGET] Automatically resumes a live AgentProgram tournament", "Planned protocol")
 
   UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
 ```
@@ -55,11 +55,11 @@ C4Container
 | 容器 | 当前边界 |
 |---|---|
 | Autonomous Skill Runner | accepted、已密封且 manifest 验证通过的 round 是下一轮 parent authority；`BEST-HARNESS.json` 只是 hash-verified projection |
-| Strategy Host | Skill paired 为 LIVE；Legacy 仅只读兼容导入；AgentProgram 仅 fixture profile 为 LIVE，non-fixture 为 `not-yet-live` |
+| Strategy Host | Skill paired 为 LIVE；Legacy 仅只读兼容导入；AgentProgram 的 fixture CLI 与注入式 non-fixture library/runtime seam 均为 LIVE，但尚无公开 non-fixture executor 配置 |
 | Execution Runtime | 执行 Kernel 已准入的计划；不决定候选是否晋升 |
 | Evidence and Governance Modules | 不修改原始 Receipt；验证 Claim 和显式门禁，且不会自动激活 Skill |
 | Versioned Registries | 保存版本化资产投影，不替代运行事实和 sealed-round 决策 |
 | CapabilityGap Queue | **TARGET**：当前没有自动生成或消费 `CapabilityGap` 的运行路径 |
-| Portfolio Orchestrator | **TARGET**：当前没有把 Skill 增益自动接入 non-fixture AgentProgram 的编排器 |
+| Portfolio Orchestrator | **TARGET**：当前没有把 Skill 增益自动接入 live AgentProgram seam 的编排器 |
 
-目标闭环为 `verified failure → CapabilityGap → Portfolio → local Skill research → validated inactive component → non-fixture AgentProgram → new evidence/failure`；图中完整画出该环路并不表示它已经实现。
+目标闭环为 `verified failure → CapabilityGap → Portfolio → local Skill research → validated inactive component → live AgentProgram → new evidence/failure`；non-fixture AgentProgram 的注入式执行 seam 已存在，但图中的自动编排闭环和公开 executor 配置尚未实现。

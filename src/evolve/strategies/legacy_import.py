@@ -149,11 +149,38 @@ class LegacyImportStrategy:
         receipts: Sequence[Receipt] | None = None,
     ) -> StrategyResult:
         campaign_id, normalized = interpretation_inputs(context, receipts)
+        observations: dict[str, object] = {
+            "replayed_receipt_count": len(normalized)
+        }
+        if normalized:
+            if len(normalized) != 1 or normalized[0].kind != "legacy_import":
+                raise StrategyViolation(
+                    "legacy import interpretation requires one import receipt"
+                )
+            receipt = normalized[0]
+            payload = receipt.payload
+            if isinstance(context, StrategyContext):
+                expected = {
+                    "imported_revision_id": context.inputs.get(
+                        "imported_revision_id"
+                    ),
+                    "legacy_artifact_sha256": context.inputs.get(
+                        "legacy_artifact_sha256"
+                    ),
+                    "provenance_uri": context.inputs.get("provenance_uri"),
+                    "claims_created": 0,
+                    "candidates_created": 0,
+                }
+                if any(payload.get(name) != value for name, value in expected.items()):
+                    raise StrategyViolation("legacy import receipt lineage mismatch")
+                if receipt.artifact_sha256 != expected["legacy_artifact_sha256"]:
+                    raise StrategyViolation("legacy import artifact identity mismatch")
+                observations.update(expected)
         return StrategyResult(
             strategy_id=self.strategy_id,
             campaign_id=campaign_id,
             receipt_ids=tuple(receipt.receipt_id for receipt in normalized),
-            observations={"replayed_receipt_count": len(normalized)},
+            observations=observations,
         )
 
     def next_action(

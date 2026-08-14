@@ -146,7 +146,9 @@ class CampaignRunner:
                 if not terminal_replay:
                     self._controller.submit(
                         plan,
-                        reserved_model_calls=1,
+                        reserved_model_calls=_reserved_model_calls(
+                            self._runtime, plan
+                        ),
                         remote=getattr(self._runtime, "remote", None),
                     )
                 execution = (
@@ -293,6 +295,14 @@ def _execution_cost(execution: ExecutionResult) -> float:
 
 def _execution_model_calls(execution: ExecutionResult) -> int:
     return sum(receipt.kind == "model" for receipt in execution.receipts)
+
+
+def _reserved_model_calls(runtime: RuntimeEntry, plan: ExecutionPlan) -> int:
+    reservation = getattr(runtime, "reserved_model_calls", 1)
+    value = reservation(plan) if callable(reservation) else reservation
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ContractViolation("runtime model-call reservation is invalid")
+    return value
 
 
 __all__ = [

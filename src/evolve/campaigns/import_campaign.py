@@ -60,6 +60,7 @@ class LegacyImportRuntime:
     """RuntimeEntry that preserves one immutable artifact without interpreting it."""
 
     remote = False
+    reserved_model_calls = 0
 
     def __init__(self, *, artifact: bytes, store: ReceiptStore) -> None:
         self._artifact = artifact
@@ -197,7 +198,7 @@ def run_legacy_import_campaign(
         campaign_id=campaign_id,
         allowed_cohorts=(Cohort.FEEDBACK,),
         max_cost_cny=0,
-        max_model_calls=1,
+        max_model_calls=0,
         expires_at=datetime(2100, 1, 1, tzinfo=UTC),
         remote_calls_allowed=False,
     )

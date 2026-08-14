@@ -172,13 +172,23 @@ python3 -m evolve campaign run --strategy agent-program --config PROGRAM.json --
 ```
 
 Skill-paired is the current LIVE native campaign. Legacy import is a read-only
-compatibility campaign, not a new evidence-minting path. AgentProgram is LIVE
-only for an explicit deterministic `execution_profile` of `fixture`: it loads
-complete hash-verified Program revisions, executes every parent/candidate
-through the common `ExecutionRuntime`, records inactive AgentProgram Registry
-rows, and advances a hash-bound fixture search parent. Fixture tournaments
-always report `claims=[]`, `native_gain_claimed=false`, and
-`promotion_eligible=false`; non-fixture AgentProgram execution remains
-`not-yet-live` and never silently falls back. Automatic `CapabilityGap` creation
-and a Portfolio Orchestrator joining Skill campaigns to non-fixture
-AgentProgram tournaments are TARGET architecture, not current product behavior.
+compatibility campaign, not a new evidence-minting path. The public
+`campaign run --strategy agent-program` command remains a deterministic
+`execution_profile=fixture` facade: it records inactive AgentProgram Registry
+rows, reports `claims=[]`, `native_gain_claimed=false`, and
+`promotion_eligible=false`.
+
+For application integrations, `AgentProgramSearchStrategy(execution_profile="live")`
+and `HashVerifiedAgentProgramTransport` provide a LIVE non-fixture execution
+seam. The transport reloads a complete Program revision, verifies its bundle,
+prompt, context, tool-policy, capability and parent-lineage hashes, and only then
+delegates to an injected `AgentProgramExecutor` through the common
+`ExecutionRuntime`. Search-parent advance first rebuilds the configured
+ReceiptStore and EvidenceGraph, then requires exactly one persisted E1+ Claim
+per participant and verifies native-to-model receipt, Program bundle, revision
+and plan identity before making the parent win ties. It never mints Claims,
+promotes a capability, or activates a revision.
+There is not yet a public non-fixture executor configuration or an automatic
+cross-strategy scheduler. Automatic `CapabilityGap` creation and a Portfolio
+Orchestrator joining Skill campaigns to live AgentProgram tournaments remain
+TARGET architecture, not current product behavior.
