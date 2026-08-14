@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -222,10 +223,14 @@ class FixtureNative:
         self.round_index = round_index
 
     def evaluate(self, plan, workspace, model_output):
+        resolved = self.round_index == 1 and plan.arm == "taught"
         return {
-            "resolved": self.round_index == 1 and plan.arm == "taught",
+            "resolved": resolved,
             "exit_code": 0,
             "prediction_sha256": model_output["patch_sha256"],
+            "native_error": None if resolved else "empty_patch",
+            "native_report_sha256": _sha(f"native-report:{plan.plan_id}"),
+            "official_receipt_sha256": _sha(f"official-receipt:{plan.plan_id}"),
         }
 
 
@@ -258,6 +263,9 @@ def _authorization(campaign_id: str, calls: int) -> Authorization:
 
 class ExecutableFixtureRoundExecutor:
     """Fake only external adapters; Runtime/Claim/Governance remain production."""
+
+    def model_transport(self, request: RoundExecutionRequest) -> FixtureModel:
+        return FixtureModel(request)
 
     def baseline(self, request: RoundExecutionRequest) -> BaselineProbeResult:
         task_ids = tuple(task.task_id for task in _tasks(request))
@@ -296,7 +304,7 @@ class ExecutableFixtureRoundExecutor:
         store = ReceiptStore(request.output_root / "prescreen/receipt-store")
         graph = EvidenceGraph(request.output_root / "prescreen/evidence-graph")
         runtime = ExecutionRuntime(
-            model_transport=FixtureModel(request),
+            model_transport=self.model_transport(request),
             workspace_manager=FixtureWorkspace(),
             native_evaluator=FixtureNative(request.round_index),
             observer_hub=ObserverHub(
@@ -311,8 +319,11 @@ class ExecutableFixtureRoundExecutor:
             candidate_revision_id=request.candidate.change_set.revision_id,
             candidate_bundle_sha256=request.candidate.bundle_sha256,
             model_receipt_ids=(model.receipt_id,),
-            structural_valid=True,
-            patch_applicable=True,
+            structural_valid=bool(model.payload.get("structural_valid")),
+            patch_applicable=(
+                bool(model.payload.get("structural_valid"))
+                and bool(str(model.payload.get("patch", "")).strip())
+            ),
             replayed=result.replayed,
         )
 
@@ -368,7 +379,7 @@ class ExecutableFixtureRoundExecutor:
             strategy=SkillPairedStrategy(),
             controller=controller,
             authorization=authorization,
-            model_transport=FixtureModel(request),
+            model_transport=self.model_transport(request),
             workspace_manager=FixtureWorkspace(),
             native_evaluator=FixtureNative(request.round_index),
             receipt_store=store,
@@ -413,6 +424,66 @@ class ExecutableFixtureRoundExecutor:
             "holdout_opened": False,
             "burned_holdout_opened": False,
         }
+
+
+class StructuralFailureFixtureModel(FixtureModel):
+    def infer(
+        self, plan: ExecutionPlan, workspace: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        result = dict(super().infer(plan, workspace))
+        if (
+            self.request.round_index == 0
+            and plan.arm == "taught"
+            and plan.metadata.get("execution_mode", "full") == "full"
+        ):
+            result["structural_valid"] = False
+            result["failure_reason"] = "malformed-hunk"
+        return result
+
+
+class StructuralFailureFixtureRoundExecutor(ExecutableFixtureRoundExecutor):
+    def model_transport(
+        self, request: RoundExecutionRequest
+    ) -> StructuralFailureFixtureModel:
+        return StructuralFailureFixtureModel(request)
+
+
+class PrescreenFailureFixtureModel(FixtureModel):
+    def infer(
+        self, plan: ExecutionPlan, workspace: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        result = dict(super().infer(plan, workspace))
+        if plan.metadata.get("execution_mode") == "model-only-prescreen":
+            result["structural_valid"] = False
+            result["failure_reason"] = "selector-no-match"
+        return result
+
+
+class PrescreenFailureFixtureRoundExecutor(ExecutableFixtureRoundExecutor):
+    def model_transport(
+        self, request: RoundExecutionRequest
+    ) -> PrescreenFailureFixtureModel:
+        return PrescreenFailureFixtureModel(request)
+
+
+SENSITIVE_FAILURE = "/private/eval/gold/holdout/system-prompt.txt"
+
+
+class SensitiveFailureFixtureModel(StructuralFailureFixtureModel):
+    def infer(
+        self, plan: ExecutionPlan, workspace: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
+        result = dict(super().infer(plan, workspace))
+        if result.get("failure_reason") is not None:
+            result["failure_reason"] = SENSITIVE_FAILURE
+        return result
+
+
+class SensitiveFailureFixtureRoundExecutor(ExecutableFixtureRoundExecutor):
+    def model_transport(
+        self, request: RoundExecutionRequest
+    ) -> SensitiveFailureFixtureModel:
+        return SensitiveFailureFixtureModel(request)
 
 
 class TamperingFixtureRoundExecutor(ExecutableFixtureRoundExecutor):
@@ -561,6 +632,296 @@ def test_public_cli_runs_two_real_feedback_rounds_and_replays_without_calls(
     ) == 0
     capsys.readouterr()
     assert len(teacher_requests) == 2
+
+
+def test_public_cli_carries_authoritative_paired_failures_into_next_teacher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=StructuralFailureFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    output = tmp_path / "paired-failure-feedback-output"
+
+    assert main(
+        [
+            "autonomous-evolve",
+            "--config",
+            str(_config(tmp_path)),
+            "--output",
+            str(output),
+            "--worktree-root",
+            str(worktree),
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    round_zero = json.loads(
+        (output / "rounds/round-0000/AUTONOMOUS-ROUND-RESULT.json").read_text()
+    )
+    campaign_feedback = round_zero["campaign_feedback"]
+    assert campaign_feedback["campaign_id"] == "paired-0"
+    assert campaign_feedback["campaign_status"] == "completed"
+    assert len(campaign_feedback["task_pairs"]) == 3
+    for pair in campaign_feedback["task_pairs"]:
+        assert pair["claim"]["classification"] == "neutral"
+        assert len(pair["claim"]["counterfactual_receipt_ids"]) == 6
+        baseline = pair["baseline"]
+        taught = pair["taught"]
+        for arm in (baseline, taught):
+            assert arm["plan_id"]
+            assert arm["execution_status"] == "completed"
+            assert arm["model_receipt_id"]
+            assert arm["external_trace_receipt_id"]
+            assert arm["native_receipt_id"]
+            assert arm["execution_terminal_receipt_id"]
+            assert len(arm["patch_sha256"]) == 64
+            assert len(arm["native_report_sha256"]) == 64
+            assert len(arm["official_receipt_sha256"]) == 64
+            assert arm["resolved"] is False
+            assert arm["native_error"] == "empty_patch"
+        assert baseline["candidate_consumed"] is False
+        assert baseline["candidate_revision_id"] is None
+        assert baseline["candidate_bundle_sha256"] is None
+        assert baseline["structural_valid"] is True
+        assert baseline["failure_reason"] is None
+        assert taught["candidate_consumed"] is True
+        assert taught["candidate_revision_id"] == round_zero["candidate_revision_id"]
+        assert taught["candidate_bundle_sha256"] == round_zero["compiled_bundle_sha256"]
+        assert taught["structural_valid"] is False
+        assert taught["failure_reason"] == "malformed-hunk"
+
+    serialized_feedback = canonical_json(campaign_feedback)
+    assert '"patch":' not in serialized_feedback
+    assert "prompt_texts" not in serialized_feedback
+    assert "candidate_prompt" not in serialized_feedback
+    assert "gold" not in serialized_feedback.casefold()
+
+    next_failure_package = json.loads(
+        (output / "rounds/round-0001/FAILURE-PACKAGE.json").read_text()
+    )
+    next_teacher_request = json.loads(
+        (output / "rounds/round-0001/TEACHER-REQUEST.json").read_text()
+    )
+    assert next_failure_package["prior_campaign_feedback"] == campaign_feedback
+    assert (
+        next_teacher_request["failure_package"]["prior_campaign_feedback"]
+        == campaign_feedback
+    )
+    dispatched_failure_package = teacher_requests[1]["failure_package"]
+    assert isinstance(dispatched_failure_package, dict)
+    assert dispatched_failure_package["no_progress_rounds"] == 1
+    assert all(
+        "source_uri" not in task and "source_repository" not in task
+        for task in dispatched_failure_package["selected_tasks"]
+    )
+    assert (
+        dispatched_failure_package["prior_campaign_feedback"] == campaign_feedback
+    )
+    baseline_only_signature = _sha(
+        canonical_json(
+            json.loads(
+                (output / "rounds/round-0000/BASELINE-RESULT.json").read_text()
+            )["failure_signatures"]
+        )
+    )
+    assert round_zero["failure_signature_sha256"] != baseline_only_signature
+
+
+def test_public_cli_carries_prescreen_rejection_into_next_teacher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=PrescreenFailureFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    output = tmp_path / "prescreen-failure-output"
+
+    assert main(
+        [
+            "autonomous-evolve",
+            "--config",
+            str(_config(tmp_path)),
+            "--output",
+            str(output),
+            "--worktree-root",
+            str(worktree),
+        ]
+    ) == 0
+
+    assert len(teacher_requests) == 2
+    prior = teacher_requests[1]["failure_package"]["prior_campaign_feedback"]
+    assert prior["campaign_status"] == "screened_out"
+    assert prior["task_pairs"] == []
+    prescreen = prior["prescreen"]
+    assert prescreen["candidate_revision_id"]
+    assert len(prescreen["candidate_bundle_sha256"]) == 64
+    assert prescreen["structural_valid"] is False
+    assert prescreen["patch_applicable"] is False
+    assert prescreen["failure_reason"] == "selector-no-match"
+    assert prescreen["model_receipt_id"]
+    assert prescreen["external_trace_receipt_id"]
+
+
+def test_public_cli_rebuilds_legacy_round_feedback_before_teacher_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evolve.autonomous.goal import GoalStateStore
+
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    original_write = GoalStateStore.write
+    interrupted = False
+
+    def interrupt_after_index(self, state):
+        nonlocal interrupted
+        if state.rounds_completed == 1 and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("after sealed legacy round index")
+        return original_write(self, state)
+
+    monkeypatch.setattr(GoalStateStore, "write", interrupt_after_index)
+    output = tmp_path / "legacy-feedback-resume"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(_config(tmp_path)),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+    with pytest.raises(KeyboardInterrupt):
+        main(argv)
+
+    index_path = output / "ROUND-INDEX.jsonl"
+    stored = json.loads(index_path.read_text())
+    stored["payload"].pop("campaign_feedback")
+    event = {key: value for key, value in stored.items() if key != "event_sha256"}
+    stored["event_sha256"] = _sha(canonical_json(event))
+    index_path.write_text(canonical_json(stored) + "\n", encoding="utf-8")
+
+    assert main(argv) == 0
+    assert len(teacher_requests) == 2
+    prior = teacher_requests[1]["failure_package"]["prior_campaign_feedback"]
+    assert len(prior["task_pairs"]) == 3
+    assert all(pair["claim"]["grade"] == "E2" for pair in prior["task_pairs"])
+
+
+def test_public_cli_hashes_unknown_sensitive_failure_text_before_teacher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=SensitiveFailureFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    output = tmp_path / "sensitive-failure-output"
+
+    assert main(
+        [
+            "autonomous-evolve",
+            "--config",
+            str(_config(tmp_path)),
+            "--output",
+            str(output),
+            "--worktree-root",
+            str(worktree),
+        ]
+    ) == 0
+    capsys.readouterr()
+
+    round_zero = json.loads(
+        (output / "rounds/round-0000/AUTONOMOUS-ROUND-RESULT.json").read_text()
+    )
+    for pair in round_zero["campaign_feedback"]["task_pairs"]:
+        assert pair["taught"]["failure_reason"] == "other"
+        assert pair["taught"]["failure_reason_raw_sha256"] == _sha(
+            SENSITIVE_FAILURE
+        )
+    second_failure = teacher_requests[1]["failure_package"]
+    assert isinstance(second_failure, dict)
+    serialized = canonical_json(second_failure["prior_campaign_feedback"])
+    assert SENSITIVE_FAILURE not in serialized
+    assert "gold" not in serialized.casefold()
+    assert "holdout" not in serialized.casefold()
+    assert "prompt" not in serialized.casefold()
+
+
+def test_public_cli_blocks_cross_task_counterfactual_receipts_before_next_teacher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evolve.autonomous.verification import CampaignOutcomeVerifier
+
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    original_verify = CampaignOutcomeVerifier.verify
+
+    def cross_bind(self, **kwargs):
+        verified = list(original_verify(self, **kwargs))
+        verified[0] = replace(
+            verified[0],
+            counterfactual_receipt_ids=verified[1].counterfactual_receipt_ids,
+        )
+        return tuple(verified)
+
+    monkeypatch.setattr(CampaignOutcomeVerifier, "verify", cross_bind)
+    output = tmp_path / "cross-task-lineage-output"
+
+    assert main(
+        [
+            "autonomous-evolve",
+            "--config",
+            str(_config(tmp_path)),
+            "--output",
+            str(output),
+            "--worktree-root",
+            str(worktree),
+        ]
+    ) == 0
+
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "blocked_integrity"
+    assert len(teacher_requests) == 1
+    assert not (output / "rounds/round-0001/TEACHER-REQUEST.json").exists()
 
 
 def test_candidate_task_lineage_tamper_blocks_integrity_and_never_advances_best(
@@ -767,6 +1128,16 @@ def test_public_cli_resumes_each_persistent_phase_without_repeating_side_effects
             (output / "rounds/round-0000/PRESCREEN-RESULT.json").read_text()
         )
         assert prescreen["replayed"] is True
+    if phase == "round-completed":
+        completed = json.loads(
+            (output / "rounds/round-0000/AUTONOMOUS-ROUND-RESULT.json").read_text()
+        )
+        resumed_failure = teacher_requests[1]["failure_package"]
+        assert isinstance(resumed_failure, dict)
+        assert (
+            resumed_failure["prior_campaign_feedback"]
+            == completed["campaign_feedback"]
+        )
 
 
 def test_cli_help_exposes_only_the_product_entry(
