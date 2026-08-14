@@ -333,7 +333,10 @@ def test_legacy_condition_prompt_changes_only_for_taught_candidate_content(
         def experiment_config():
             return {"temperature": 0}
 
+    taught_inputs: list[str] = []
+
     def builder(*, taught_skill: str, **_kwargs):
+        taught_inputs.append(taught_skill)
         return (
             SimpleNamespace(
                 mechanism="operator",
@@ -380,3 +383,5 @@ def test_legacy_condition_prompt_changes_only_for_taught_candidate_content(
 
     assert baseline_first.revision == baseline_second.revision
     assert taught_first.revision != taught_second.revision
+    assert taught_inputs[2].startswith("COMPILED-CANDIDATE:\n")
+    assert taught_inputs[3].startswith("COMPILED-CANDIDATE:\n")

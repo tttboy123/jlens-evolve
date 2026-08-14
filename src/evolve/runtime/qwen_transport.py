@@ -494,7 +494,10 @@ class LegacyQwenCellRunner:
         else:
             if compiled is None:
                 raise ContractViolation("taught execution requires compiled candidate")
-            teaching = compiled_candidate_prompt(compiled, plan.task.task_id)
+            teaching = (
+                "COMPILED-CANDIDATE:\n"
+                + compiled_candidate_prompt(compiled, plan.task.task_id)
+            )
             parent_revision_id = compiled.change_set.parent_revision_id
         conditions = builder(
             taught_skill=teaching,
