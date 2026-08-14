@@ -106,6 +106,56 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def _sealed_replay(
+    *,
+    config: Mapping[str, Any],
+    run_config_sha256: str,
+    output_root: Path,
+    final_commit: str,
+) -> dict[str, Any] | None:
+    result_path = output_root / "CAMPAIGN-RESULT.json"
+    if not result_path.exists():
+        return None
+    manifest_path = output_root / "EVIDENCE-MANIFEST.json"
+    if not manifest_path.is_file():
+        raise ContractViolation("sealed fresh campaign replay authority is incomplete")
+    AuditVerifier().verify_manifest(manifest_path, root=output_root)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ContractViolation("sealed fresh campaign replay is unreadable") from error
+    entries = manifest.get("entries") if isinstance(manifest, dict) else None
+    if not isinstance(entries, list):
+        raise ContractViolation("sealed fresh campaign manifest is invalid")
+    entry_paths = tuple(
+        str(row.get("path")) for row in entries if isinstance(row, dict)
+    )
+    required = {
+        "CAMPAIGN-RESULT.json",
+        "FINAL-REPORT.json",
+        "FINAL-REPORT.md",
+    }
+    if (
+        len(entry_paths) != len(entries)
+        or len(set(entry_paths)) != len(entry_paths)
+        or not required.issubset(entry_paths)
+    ):
+        raise ContractViolation("sealed fresh campaign manifest identity is incomplete")
+    if not isinstance(result, dict) or result.get("schema_version") != 1:
+        raise ContractViolation("sealed fresh campaign result is invalid")
+    campaign_id = config.get("campaign_id")
+    if not isinstance(campaign_id, str) or not campaign_id:
+        raise ContractViolation("fresh campaign_id must be non-empty")
+    if (
+        result.get("run_config_sha256") != run_config_sha256
+        or result.get("campaign_id") != campaign_id
+        or result.get("final_commit_sha") != final_commit
+    ):
+        raise ContractViolation("sealed fresh campaign replay identity mismatch")
+    return result
+
+
 def _git(root: Path, *args: str) -> str:
     completed = subprocess.run(
         ("git", *args), cwd=root, check=False, capture_output=True, text=True
@@ -472,7 +522,19 @@ def _freeze_release_candidate_artifacts(
 def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str, Any]:
     """Execute all six arms via the v3 Runtime and seal rebuildable evidence."""
 
-    config = _load_config(config_path.resolve())
+    config_path = config_path.resolve()
+    try:
+        config_literal = config_path.read_bytes()
+    except OSError as error:
+        raise ContractViolation("fresh feedback config is unreadable") from error
+    config = _load_config(config_path)
+    try:
+        config_after_load = config_path.read_bytes()
+    except OSError as error:
+        raise ContractViolation("fresh feedback config is unreadable") from error
+    if config_after_load != config_literal:
+        raise ContractViolation("fresh feedback config changed while loading")
+    run_config_sha256 = hashlib.sha256(config_literal).hexdigest()
     output_root = output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     source_root_value = config.get("source_root", str(Path.cwd()))
@@ -483,6 +545,14 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
     expected_commit = config.get("final_commit_sha")
     if expected_commit != final_commit:
         raise ContractViolation("fresh campaign config is not bound to final HEAD")
+    replayed = _sealed_replay(
+        config=config,
+        run_config_sha256=run_config_sha256,
+        output_root=output_root,
+        final_commit=final_commit,
+    )
+    if replayed is not None:
+        return replayed
 
     legacy_root = _path(config, "legacy_root")
     model_path = _path(config, "model_path")
@@ -735,6 +805,7 @@ def run_fresh_feedback_e2e(*, config_path: Path, output_root: Path) -> dict[str,
         "schema_version": 1,
         "campaign_id": campaign_id,
         "final_commit_sha": final_commit,
+        "run_config_sha256": run_config_sha256,
         "campaign_status": str(result.snapshot.status),
         "execution_statuses": [execution.status for execution in result.executions],
         "execution_replayed": [execution.replayed for execution in result.executions],
