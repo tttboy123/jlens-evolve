@@ -581,7 +581,9 @@ class LegacyQwenCellRunner:
             "raw_output_path": str(raw),
             "raw_output_sha256": frozen["raw_output_sha256"],
             "prompt_paths": [str(path) for path in prompt_files],
-            "prompt_texts": [path.read_text(encoding="utf-8") for path in prompt_files],
+            "prompt_texts": [
+                path.read_bytes().decode("utf-8") for path in prompt_files
+            ],
             "prompt_sha256": prompt_hashes,
             "structural_valid": bool(frozen["structural_valid"]),
             "failure_reason": frozen.get("failure_reason"),

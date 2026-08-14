@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -161,6 +162,71 @@ def test_legacy_runner_baseline_does_not_read_candidate_and_taught_fails_closed(
 
     with pytest.raises(ContractViolation, match="compiled revision manifest"):
         runner._compiled_for_plan(_plan(arm="taught"))
+
+
+def test_frozen_qwen_prompt_preserves_exact_crlf_bytes(tmp_path: Path) -> None:
+    prompt_bytes = b"SYSTEM: repair\r\nUSER: preserve exact bytes\r\n"
+    raw_bytes = b"model output\n"
+    (tmp_path / "prompt-000.txt").write_bytes(prompt_bytes)
+    (tmp_path / "raw-output.txt").write_bytes(raw_bytes)
+    expected_identity = {
+        "plan_id": "plan-baseline",
+        "candidate_consumed": False,
+        "candidate_bundle_sha256": None,
+        "candidate_revision_id": None,
+        "compiled_artifact_sha256": {},
+        "candidate_prompt_sha256": None,
+        "parent_harness_revision_id": None,
+        "parent_harness_bundle_sha256": None,
+        "parent_harness_prompt_sha256": None,
+    }
+    patch = "diff --git a/a.py b/a.py\n"
+    frozen = {
+        "request": expected_identity,
+        **{
+            name: expected_identity[name]
+            for name in (
+                "candidate_consumed",
+                "candidate_bundle_sha256",
+                "candidate_revision_id",
+                "compiled_artifact_sha256",
+                "candidate_prompt_sha256",
+                "parent_harness_revision_id",
+                "parent_harness_bundle_sha256",
+                "parent_harness_prompt_sha256",
+            )
+        },
+        "parent_harness_prompt": None,
+        "raw_output_file": "raw-output.txt",
+        "raw_output_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "patch": patch,
+        "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+        "prompt_files": ["prompt-000.txt"],
+        "prompt_sha256": [hashlib.sha256(prompt_bytes).hexdigest()],
+        "structural_valid": True,
+        "failure_reason": None,
+        "mechanism": "operator",
+        "condition_id": "condition-baseline",
+        "candidate_prompt": None,
+        "model_identity_sha256": "b" * 64,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "token_usage_available": False,
+        "cost_cny": 0,
+        "elapsed_seconds": 0.1,
+    }
+    (tmp_path / "RESULT.json").write_text(
+        json.dumps(frozen, sort_keys=True), encoding="utf-8"
+    )
+
+    loaded = LegacyQwenCellRunner._load_frozen_result(
+        tmp_path, expected_identity
+    )
+
+    assert loaded["prompt_texts"] == [prompt_bytes.decode("utf-8")]
+    assert hashlib.sha256(loaded["prompt_texts"][0].encode()).hexdigest() == (
+        loaded["prompt_sha256"][0]
+    )
 
 
 def _compiled(tmp_path: Path, skill_text: str) -> CompiledRevision:
