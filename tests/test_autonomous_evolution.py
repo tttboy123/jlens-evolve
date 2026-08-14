@@ -424,6 +424,33 @@ class TamperingFixtureRoundExecutor(ExecutableFixtureRoundExecutor):
         return result
 
 
+class PhaseInterruptingRoundExecutor:
+    def __init__(self, phase: str) -> None:
+        self.phase = phase
+        self.interrupted = False
+        self.delegate = ExecutableFixtureRoundExecutor()
+
+    def baseline(self, request: RoundExecutionRequest) -> BaselineProbeResult:
+        return self.delegate.baseline(request)
+
+    def prescreen(self, request: RoundExecutionRequest) -> PrescreenResult:
+        if self.phase == "candidate-compiled" and not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt("after candidate compilation")
+        result = self.delegate.prescreen(request)
+        if self.phase == "qwen-run" and not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt("after Qwen receipt")
+        return result
+
+    def paired(self, request: RoundExecutionRequest) -> Mapping[str, Any]:
+        result = self.delegate.paired(request)
+        if self.phase == "native-run" and not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt("after native receipts")
+        return result
+
+
 def _teacher(
     teacher_requests: list[dict[str, object]], request: dict[str, object]
 ) -> dict[str, object]:
@@ -652,6 +679,94 @@ def test_public_cli_stops_on_repeated_failure_signature_without_waiting(
     assert result["status"] == "max_same_failure_signature"
     assert result["rounds_completed"] == 1
     assert len(teacher_requests) == 1
+
+
+@pytest.mark.parametrize(
+    "phase",
+    (
+        "teacher-frozen",
+        "candidate-compiled",
+        "qwen-run",
+        "native-run",
+        "round-completed",
+    ),
+)
+def test_public_cli_resumes_each_persistent_phase_without_repeating_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
+) -> None:
+    from evolve.autonomous.goal import GoalStateStore
+    from evolve.proposals import CandidateCompiler
+
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    executor = PhaseInterruptingRoundExecutor(phase)
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=executor,
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    if phase == "teacher-frozen":
+        original_compile = CandidateCompiler.compile
+        interrupted = False
+
+        def interrupt_compile(self, *args, **kwargs):
+            nonlocal interrupted
+            if not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt("after Teacher response freeze")
+            return original_compile(self, *args, **kwargs)
+
+        monkeypatch.setattr(CandidateCompiler, "compile", interrupt_compile)
+    if phase == "round-completed":
+        original_write = GoalStateStore.write
+        interrupted_state = False
+
+        def interrupt_state_write(self, state):
+            nonlocal interrupted_state
+            if state.rounds_completed == 1 and not interrupted_state:
+                interrupted_state = True
+                raise KeyboardInterrupt("after sealed round index")
+            return original_write(self, state)
+
+        monkeypatch.setattr(GoalStateStore, "write", interrupt_state_write)
+
+    output = tmp_path / f"resume-{phase}"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(_config(tmp_path)),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+    with pytest.raises(KeyboardInterrupt):
+        main(argv)
+
+    preserved: bytes | None = None
+    receipt_path: Path | None = None
+    if phase == "qwen-run":
+        receipt_path = output / "rounds/round-0000/prescreen/receipt-store/receipts.jsonl"
+    elif phase == "native-run":
+        receipt_path = output / "rounds/round-0000/receipt-store/receipts.jsonl"
+    if receipt_path is not None:
+        preserved = receipt_path.read_bytes()
+
+    assert main(argv) == 0
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "goal_reached"
+    assert len(teacher_requests) == 2
+    if receipt_path is not None:
+        assert receipt_path.read_bytes() == preserved
+    if phase == "qwen-run":
+        prescreen = json.loads(
+            (output / "rounds/round-0000/PRESCREEN-RESULT.json").read_text()
+        )
+        assert prescreen["replayed"] is True
 
 
 def test_cli_help_exposes_only_the_product_entry(
