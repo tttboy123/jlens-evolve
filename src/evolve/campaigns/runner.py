@@ -89,7 +89,10 @@ class CampaignRunner:
         plans = tuple(plan for _, context_plans in planned for plan in context_plans)
         self._validate_plans(spec, strategy, plans)
 
-        if strategy.status is not StrategyStatus.LIVE:
+        if strategy.status is StrategyStatus.NOT_YET_LIVE or (
+            strategy.status is StrategyStatus.COMPATIBILITY
+            and (self._runtime is None or self._controller is None)
+        ):
             status = (
                 CampaignRunStatus.COMPATIBILITY
                 if strategy.status is StrategyStatus.COMPATIBILITY
@@ -141,7 +144,11 @@ class CampaignRunner:
         for context_index, (_, context_plans) in enumerate(planned):
             for plan in context_plans:
                 if not terminal_replay:
-                    self._controller.submit(plan, reserved_model_calls=1)
+                    self._controller.submit(
+                        plan,
+                        reserved_model_calls=1,
+                        remote=getattr(self._runtime, "remote", None),
+                    )
                 execution = (
                     self._runtime.execute(
                         plan,
@@ -176,10 +183,18 @@ class CampaignRunner:
                 break
 
         if terminal_replay:
-            run_status = CampaignRunStatus.COMPLETED
+            run_status = (
+                CampaignRunStatus.COMPATIBILITY
+                if strategy.status is StrategyStatus.COMPATIBILITY
+                else CampaignRunStatus.COMPLETED
+            )
         elif failure_reason is None:
             self._controller.finalize(CampaignStatus.COMPLETED)
-            run_status = CampaignRunStatus.COMPLETED
+            run_status = (
+                CampaignRunStatus.COMPATIBILITY
+                if strategy.status is StrategyStatus.COMPATIBILITY
+                else CampaignRunStatus.COMPLETED
+            )
         else:
             self._controller.mark_partial(failure_reason)
             run_status = CampaignRunStatus.PARTIAL

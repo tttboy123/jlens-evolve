@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from evolve.alignment import align_native_pair
+from evolve.campaigns import run_legacy_import_campaign
 from evolve.contracts import (
     Claim,
     Cohort,
@@ -295,23 +296,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             return 2
-        legacy = _json_config(args.config.resolve())
-        required = {
-            "root",
-            "legacy_root",
-            "teacher_receipt",
-            "qwen_receipt",
-        }
-        if set(legacy) != required:
-            raise ValueError("legacy import campaign config fields are invalid")
-        report = run_legacy_feedback_e2e(
-            root=Path(str(legacy["root"])).expanduser().resolve(),
-            legacy_root=Path(str(legacy["legacy_root"])).expanduser().resolve(),
-            output=args.output.resolve(),
-            teacher_receipt=Path(str(legacy["teacher_receipt"])).expanduser().resolve(),
-            qwen_receipt=Path(str(legacy["qwen_receipt"])).expanduser().resolve(),
+        report = run_legacy_import_campaign(
+            config_path=args.config.resolve(), output_root=args.output.resolve()
         )
-        print(canonical_json({**report, "strategy_status": "compatibility"}))
+        print(canonical_json(report))
         return 0
     count = AuditVerifier().verify_manifest(args.manifest.resolve(), root=args.root)
     print(f"verified {count} manifest entries")
