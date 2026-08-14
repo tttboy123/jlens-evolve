@@ -38,6 +38,19 @@ _CANDIDATE_SCHEMA = {
     "eval_note": "native evaluation procedure",
 }
 
+_FIELD_CONTRACTS: dict[str, object] = {
+    **_CANDIDATE_SCHEMA,
+    "operator": {
+        "id": "non-empty operator id",
+        "kind": "zero-arg",
+        "arguments": [],
+        "instruction": "non-empty executable instruction",
+    },
+    "router": {
+        "routes": {"<selected task instance_id>": "<operator id>"}
+    },
+}
+
 
 class OpenAICompatibleTeacherTransport:
     """Send one deterministic JSON-mode request to a compatible endpoint."""
@@ -110,9 +123,21 @@ class OpenAICompatibleTeacherTransport:
         system = canonical_json(
             {
                 "purpose": "evolve an external Skill/Harness for a frozen model",
-                "candidate_schema": _CANDIDATE_SCHEMA,
+                "output_contract": {
+                    "return_direct_object": True,
+                    "top_level_keys": list(_CANDIDATE_SCHEMA),
+                    "forbidden_wrapper_keys": [
+                        "candidate",
+                        "candidate_schema",
+                        "schema",
+                    ],
+                    "no_additional_top_level_keys": True,
+                },
+                "field_contracts": _FIELD_CONTRACTS,
                 "constraints": [
-                    "return exactly one JSON object",
+                    "return exactly one direct Candidate JSON object",
+                    "do not wrap the object in candidate, candidate_schema, or schema",
+                    "include every top_level_keys field exactly once",
                     "candidate remains inactive",
                     "do not change weights, evaluator, cohort, or activation state",
                 ],

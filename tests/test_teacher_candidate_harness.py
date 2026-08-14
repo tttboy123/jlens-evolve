@@ -274,9 +274,28 @@ def test_teacher_transports_share_protocol_and_deepseek_contract(tmp_path: Path)
     assert deepseek({"request_id": "deepseek", "max_output_tokens": 100}) == raw
     deepseek_body = json.loads(captured[-1][0].data)
     assert deepseek_body["thinking"] == {"type": "disabled"}
-    assert set(json.loads(deepseek_body["messages"][0]["content"])["candidate_schema"]) == set(
+    system_contract = json.loads(
+        deepseek_body["messages"][0]["content"]
+    )
+    assert "candidate_schema" not in system_contract
+    assert set(system_contract["output_contract"]["top_level_keys"]) == set(
         _candidate()
     )
+    assert system_contract["output_contract"]["return_direct_object"] is True
+    assert system_contract["output_contract"]["forbidden_wrapper_keys"] == [
+        "candidate",
+        "candidate_schema",
+        "schema",
+    ]
+    assert system_contract["field_contracts"]["operator"] == {
+        "arguments": [],
+        "id": "non-empty operator id",
+        "instruction": "non-empty executable instruction",
+        "kind": "zero-arg",
+    }
+    assert system_contract["field_contracts"]["router"] == {
+        "routes": {"<selected task instance_id>": "<operator id>"}
+    }
 
     frozen_request = tmp_path / "request.json"
     frozen_response = tmp_path / "raw-response.json"
