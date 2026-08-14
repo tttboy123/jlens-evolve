@@ -289,15 +289,15 @@ def main(argv: list[str] | None = None) -> int:
             print(canonical_json(result))
             return 0
         if args.campaign_action == "run" and args.strategy == "agent-program":
-            result = run_agent_program_fixture_campaign(
+            agent_program_result = run_agent_program_fixture_campaign(
                 config_path=args.config.resolve(), output_root=args.output.resolve()
             )
-            print(canonical_json(result))
+            print(canonical_json(agent_program_result))
             return 0
-        report = run_legacy_import_campaign(
+        legacy_import_result = run_legacy_import_campaign(
             config_path=args.config.resolve(), output_root=args.output.resolve()
         )
-        print(canonical_json(report))
+        print(canonical_json(legacy_import_result))
         return 0
     count = AuditVerifier().verify_manifest(args.manifest.resolve(), root=args.root)
     print(f"verified {count} manifest entries")
