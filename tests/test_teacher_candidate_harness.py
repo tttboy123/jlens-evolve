@@ -296,6 +296,12 @@ def test_teacher_transports_share_protocol_and_deepseek_contract(tmp_path: Path)
     assert system_contract["field_contracts"]["router"] == {
         "routes": {"<selected task instance_id>": "<operator id>"}
     }
+    assert system_contract["field_contracts"]["preconditions"] == [
+        "non-empty execution condition"
+    ]
+    assert system_contract["field_contracts"]["memory_policy"] == (
+        "null or a non-empty JSON object"
+    )
 
     frozen_request = tmp_path / "request.json"
     frozen_response = tmp_path / "raw-response.json"

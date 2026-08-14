@@ -49,6 +49,11 @@ _FIELD_CONTRACTS: dict[str, object] = {
     "router": {
         "routes": {"<selected task instance_id>": "<operator id>"}
     },
+    "memory_policy": "null or a non-empty JSON object",
+    "preconditions": ["non-empty execution condition"],
+    "expected_external_effect": "non-empty string or JSON object",
+    "expected_internal_effect": "non-empty string or JSON object",
+    "falsification": "non-empty rejection condition string or JSON object",
 }
 
 
