@@ -95,6 +95,13 @@ native campaign, Receipt Store, and sealed round artifacts are replayed by
 identity; a completed paid Teacher request is not sent again. The append-only
 Teacher cost ledger reserves before dispatch and recovers across restart.
 
+Before any per-round external dispatch, the runner writes a hash-bound
+`PREFLIGHT-HEALTH.json`. A real executor must prove the configured Teacher mode,
+local Qwen implementation/dependencies/model identity and native evaluator
+interpreter/assets are healthy. A failed preflight stops before Teacher spend or
+model/native dispatch; test fixtures are explicitly labelled and cannot
+masquerade as a real preflight.
+
 The current search produces one Candidate per round. Set
 `qwen_prescreen_count` to `1` to run a real model-only prescreen or `0` to
 explicitly skip it; skipped output is labelled `status=skipped` and never claims
@@ -146,6 +153,12 @@ cannot promote a candidate or override the sealed-round decision. The proposed
 Candidate is only consumed by taught execution. `active` remains `false`:
 Governance does not auto-activate a Skill or Capability.
 
+Only a verified native `gain` may advance the search parent. Neutral,
+regression and infrastructure outcomes remain feedback but never count as
+evolution and never update BEST. Resume rebuilds state counters, status, accepted
+parent and prior feedback from the last manifest-verified, hash-indexed round and
+compares them with `EVOLUTION-STATE.json`; disagreement fails closed.
+
 Each completed round also freezes Teacher-safe `campaign_feedback`, rebuilt
 from authoritative model, external-trace and native receipts. The next round
 carries it unchanged as `prior_campaign_feedback`; patch bytes, prompts and
@@ -158,6 +171,10 @@ The loop stops only for `goal_reached`, `max_rounds_reached`, `no_progress`,
 `max_same_failure_signature`, `disk_limit`, `stopped_by_user`, or
 `blocked_integrity`. The three numeric safety limits are configured in `goal`.
 A normal round immediately advances without waiting for Codex or a user message.
+An evaluator infrastructure failure is projected from ReceiptStore and
+EvidenceGraph as an explicit no-Claim checkpoint. Consecutive infrastructure
+failures increment the configured counter and stop at the threshold, preventing
+an unattended batch from repeatedly executing a broken runtime.
 
 Confirm `holdout_opened=false` and `skill_active=false` in
 `EVOLUTION-RESULT.json`, and inspect every task's `cohort` in the frozen task
@@ -172,23 +189,20 @@ python3 -m evolve campaign run --strategy agent-program --config PROGRAM.json --
 ```
 
 Skill-paired is the current LIVE native campaign. Legacy import is a read-only
-compatibility campaign, not a new evidence-minting path. The public
-`campaign run --strategy agent-program` command remains a deterministic
-`execution_profile=fixture` facade: it records inactive AgentProgram Registry
-rows, reports `claims=[]`, `native_gain_claimed=false`, and
-`promotion_eligible=false`.
+compatibility campaign, not a new evidence-minting path. The public AgentProgram
+command selects an explicit `execution_profile`. `fixture` remains deterministic
+compatibility; `live` accepts only `local-declarative-agent-program-v1`, complete
+hash-verified Program revisions and a feedback task. It dispatches through
+`ExecutionRuntime` and `CampaignRunner`, records only inactive AgentProgram
+revisions and cannot dynamically import, `eval` or shell an executor.
 
-For application integrations, `AgentProgramSearchStrategy(execution_profile="live")`
-and `HashVerifiedAgentProgramTransport` provide a LIVE non-fixture execution
-seam. The transport reloads a complete Program revision, verifies its bundle,
-prompt, context, tool-policy, capability and parent-lineage hashes, and only then
-delegates to an injected `AgentProgramExecutor` through the common
-`ExecutionRuntime`. Search-parent advance first rebuilds the configured
-ReceiptStore and EvidenceGraph, then requires exactly one persisted E1+ Claim
-per participant and verifies native-to-model receipt, Program bundle, revision
-and plan identity before making the parent win ties. It never mints Claims,
-promotes a capability, or activates a revision.
-There is not yet a public non-fixture executor configuration or an automatic
-cross-strategy scheduler. Automatic `CapabilityGap` creation and a Portfolio
-Orchestrator joining Skill campaigns to live AgentProgram tournaments remain
-TARGET architecture, not current product behavior.
+`evolve.portfolio.PortfolioOrchestrator` provides the minimal cross-strategy
+product seam: authoritative AgentProgram failure → immutable CapabilityGap →
+inactive Teacher Skill candidate → externally validated Skill evidence → signed
+Governance-approved but inactive Capability → complete AgentProgram revision →
+live tournament. It does not mint Claims/native outcomes or activate assets.
+
+The local integrity assumptions are explicit in
+[`TRUST-BOUNDARIES.md`](TRUST-BOUNDARIES.md). A manifest proves byte integrity,
+not remote authenticity or protection from an administrator who can replace all
+files and the verifier.

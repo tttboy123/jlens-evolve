@@ -8,8 +8,8 @@
 | Round reports as truth | receipts + claims, projected by `evolve.reporting` | replaced |
 | First-generation replay | `LegacyImportStrategy` | read-only compatibility facade; LIVE for import only |
 | Third-generation paired Skill A/B | `SkillPairedStrategy` | LIVE native campaign |
-| Second-generation tournaments | `AgentProgramSearchStrategy` | fixture CLI LIVE; non-fixture library/runtime seam LIVE; public executor config not yet exposed |
-| Cross-strategy capability-gap scheduling | Portfolio Orchestrator + `CapabilityGap` | TARGET; not implemented |
+| Second-generation tournaments | `AgentProgramSearchStrategy` | fixture compatibility + allowlisted public non-fixture LIVE profile |
+| Cross-strategy capability-gap scheduling | Portfolio Orchestrator + `CapabilityGap` | minimal LIVE product seam; no automatic activation |
 | Local Qwen operator/span execution | `LegacyQwenPairTransport` behind `ExecutionRuntime` | live compatibility transport |
 | Official SWE-bench invocation | `LegacyOfficialNativeEvaluator` behind `ExecutionRuntime` | live compatibility evaluator |
 | Mutable task checkout selection | `FrozenSourceWorkspaceManager` | replaced with clean, exact-revision admission |
@@ -80,14 +80,13 @@ equivalence is independently demonstrated.
   official native evaluation.
 - **Legacy:** LIVE only as a read-only compatibility import. It does not mint
   current native Claims or become the autonomous parent authority.
-- **AgentProgram:** the public CLI remains the deterministic
-  `execution_profile=fixture` facade. A non-fixture library/runtime seam is LIVE
-  through `AgentProgramSearchStrategy(execution_profile="live")` plus
-  `HashVerifiedAgentProgramTransport` and an injected executor. It verifies the
-  full Program revision and replays ReceiptStore plus EvidenceGraph before
-  accepting externally produced Claims for a hash-bound tournament decision,
-  but does not mint Claims, promote, activate, or provide a public executor
-  configuration.
-- **Portfolio closure:** automatic `CapabilityGap` production, portfolio
-  scheduling, and feeding validated local capabilities into a non-fixture
-  AgentProgram tournament remain TARGET architecture.
+- **AgentProgram:** the public CLI supports the deterministic fixture profile and
+  one allowlisted local non-fixture profile. The live path verifies complete
+  Program revisions, replays Runtime Receipt/Evidence authorities and derives a
+  hash-bound tournament decision. It cannot dynamically import an executor,
+  mint Claims, promote or activate.
+- **Portfolio closure:** `PortfolioOrchestrator` implements one bounded product
+  path from an authoritative AgentProgram failure to CapabilityGap, inactive
+  Skill, signed Governance-approved inactive Capability, complete AgentProgram
+  revision and live tournament. Broader portfolio optimization remains future
+  work; this seam is deliberately not a second Campaign or Governance authority.

@@ -1,24 +1,53 @@
 {
-  "schema_version": 1,
-  "deleted_files": [],
-  "deleted_functions": [],
-  "kept_authorities": ["src/evolve"],
-  "compatibility_files": [
-    "src/evolve/strategies/legacy_import.py",
-    "src/evolve/strategies/skill_paired.py",
-    "src/evolve/strategies/agent_program.py",
-    "src/evolve/runtime/qwen_transport.py",
-    "src/evolve/runtime/live_adapters.py"
+  "schema_version": 2,
+  "scope_base_commit": "e31bec5071e655664321a0f747914822ce89099d",
+  "deleted_files": [
+    "docs/REPOSITORY-CLEANUP-REPORT.md",
+    "docs/REPOSITORY-CLEANUP-REPORT.json"
   ],
-  "deprecated_external_repository": "/Users/lune/Documents/Codex/2026-07-18/bang/work/evolve-jlens-cluster",
-  "generated_exclusions": ["__pycache__", ".pytest_cache", ".ruff_cache", "runs"],
+  "consolidated_responsibilities": [
+    "AgentProgram live orchestration",
+    "AgentProgram replay and report authority",
+    "Runtime receipt identity",
+    "native execution identity",
+    "Claim projection from native outcome"
+  ],
+  "kept_authorities": [
+    "src/evolve/kernel",
+    "src/evolve/runtime",
+    "src/evolve/evidence",
+    "src/evolve/governance",
+    "src/evolve/autonomous",
+    "src/evolve/portfolio"
+  ],
+  "compatibility_retained": [
+    "LegacyImportStrategy",
+    "LegacyQwenCellRunner",
+    "LegacyOfficialNativeEvaluator",
+    "fixture AgentProgram profile",
+    "historical schema readers"
+  ],
   "immutable_evidence_deleted": false,
-  "duplicate_authorities_found": false,
+  "duplicate_cleanup_reports_removed": true,
   "unused_v3_stubs_found": false,
   "post_cleanup_inventory": {
-    "source_python_files": 36,
-    "test_python_files": 10,
-    "python_lines": 7415
+    "source_python_files": 69,
+    "source_python_lines": 20430,
+    "test_python_files": 28,
+    "test_python_lines": 12312
   },
-  "known_deferred_deletion": "Legacy schema readers remain until semantic replay equivalence is independently verified."
+  "verification": {
+    "targeted": "passed",
+    "pytest_full": "257 passed",
+    "ruff": "passed",
+    "mypy": "passed (69 source files)",
+    "git_diff_check": "passed"
+  },
+  "generated_exclusions": [
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    "runs"
+  ],
+  "known_deferred_deletion": "Legacy v2.5 replay readers and Qwen/native bridges remain until semantic equivalence no longer depends on them."
 }

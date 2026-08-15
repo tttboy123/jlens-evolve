@@ -1,6 +1,6 @@
 # v3.0 Container Architecture
 
-该图同时标出当前可运行边界和跨策略闭环的目标边界：`[LIVE]` 表示当前代码可执行，`[TARGET]` 表示设计目标、尚不可调用或部署。带有 `[TARGET]` 的关系同样不是当前行为。
+该图标出当前可运行边界：`[LIVE]` 表示当前代码可执行；更广泛的多目标 Portfolio 优化仍属于后续产品扩展。
 
 ```mermaid
 C4Container
@@ -18,12 +18,12 @@ C4Container
     Container(autonomousRunner, "[LIVE] Autonomous Skill Runner", "Python module", "Selects feedback tasks, proposes inactive revisions, seals rounds and resumes from accepted parents")
     Container(kernel, "[LIVE] Campaign Kernel", "Python runtime", "Checks authorization and lifecycle boundaries")
     Container(execution, "[LIVE] Execution Runtime", "Python runtime", "Executes bounded model, trace and evaluator plans")
-    Container(strategyHost, "[LIVE] Strategy Host", "Python strategies", "Runs Legacy import, Skill paired campaigns, fixture CLI and injected non-fixture AgentProgram execution")
+    Container(strategyHost, "[LIVE] Strategy Host", "Python strategies", "Runs Legacy import, Skill paired campaigns, fixture and allowlisted non-fixture AgentProgram execution")
     Container(evidence, "[LIVE] Evidence and Governance Modules", "Python modules", "Builds evidence graphs, verifies Claims and applies gates")
     ContainerDb(receiptStore, "[LIVE] Receipt and Artifact Store", "Append-only files", "Stores hash-bound runtime facts, Claims and sealed manifests")
-    ContainerDb(registries, "[LIVE] Versioned Registries", "JSONL projections", "Stores inactive Skills, capabilities and fixture AgentProgram revisions")
-    Container(capabilityGap, "[TARGET] CapabilityGap Queue", "Not implemented", "Would turn verified failure evidence into schedulable local capability gaps")
-    Container(portfolio, "[TARGET] Portfolio Orchestrator", "Not implemented", "Would automatically coordinate gap research and live AgentProgram tournaments")
+    ContainerDb(registries, "[LIVE] Versioned Registries", "JSONL projections", "Stores inactive Skills, capabilities and AgentProgram revisions")
+    Container(capabilityGap, "[LIVE] CapabilityGap Log", "Append-only portfolio facts", "Turns one authoritative AgentProgram failure into a scoped capability gap")
+    Container(portfolio, "[LIVE] Portfolio Orchestrator", "Bounded Python orchestrator", "Coordinates one gap-to-inactive-capability-to-tournament path")
   }
 
   Rel(operator, productCli, "Starts authorized runs and inspects results", "CLI")
@@ -41,11 +41,11 @@ C4Container
   Rel(strategyHost, registries, "Writes inactive versioned assets", "Registry protocol")
   Rel(evidence, registries, "Applies explicit verification and governance decisions", "Registry protocol")
 
-  Rel(evidence, capabilityGap, "[TARGET] Emits a verified, scoped gap", "Planned protocol")
-  Rel(capabilityGap, portfolio, "[TARGET] Queues capability research", "Planned protocol")
-  Rel(portfolio, strategyHost, "[TARGET] Schedules a local Skill campaign", "Planned protocol")
-  Rel(registries, portfolio, "[TARGET] Returns a validated inactive component", "Planned protocol")
-  Rel(portfolio, strategyHost, "[TARGET] Automatically resumes a live AgentProgram tournament", "Planned protocol")
+  Rel(evidence, capabilityGap, "[LIVE] Emits a verified, scoped gap", "Portfolio protocol")
+  Rel(capabilityGap, portfolio, "[LIVE] Starts bounded capability research", "Portfolio request")
+  Rel(portfolio, strategyHost, "[LIVE] Requests externally validated Skill evidence", "Injected authority")
+  Rel(registries, portfolio, "[LIVE] Returns a Governance-approved inactive component", "Verified registry")
+  Rel(portfolio, strategyHost, "[LIVE] Runs a live AgentProgram tournament", "CampaignRunner")
 
   UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
 ```
@@ -55,11 +55,11 @@ C4Container
 | 容器 | 当前边界 |
 |---|---|
 | Autonomous Skill Runner | accepted、已密封且 manifest 验证通过的 round 是下一轮 parent authority；`BEST-HARNESS.json` 只是 hash-verified projection |
-| Strategy Host | Skill paired 为 LIVE；Legacy 仅只读兼容导入；AgentProgram 的 fixture CLI 与注入式 non-fixture library/runtime seam 均为 LIVE，但尚无公开 non-fixture executor 配置 |
+| Strategy Host | Skill paired 为 LIVE；Legacy 仅只读兼容导入；AgentProgram fixture 与公开 allowlisted non-fixture profile 均为 LIVE |
 | Execution Runtime | 执行 Kernel 已准入的计划；不决定候选是否晋升 |
 | Evidence and Governance Modules | 不修改原始 Receipt；验证 Claim 和显式门禁，且不会自动激活 Skill |
 | Versioned Registries | 保存版本化资产投影，不替代运行事实和 sealed-round 决策 |
-| CapabilityGap Queue | **TARGET**：当前没有自动生成或消费 `CapabilityGap` 的运行路径 |
-| Portfolio Orchestrator | **TARGET**：当前没有把 Skill 增益自动接入 live AgentProgram seam 的编排器 |
+| CapabilityGap Log | **LIVE**：从一个权威失败 Claim 写入 immutable gap，不是第二个 Claim authority |
+| Portfolio Orchestrator | **LIVE（最小闭环）**：只连接一条 inactive Skill/Capability 到 live AgentProgram tournament；不自动激活 |
 
-目标闭环为 `verified failure → CapabilityGap → Portfolio → local Skill research → validated inactive component → live AgentProgram → new evidence/failure`；non-fixture AgentProgram 的注入式执行 seam 已存在，但图中的自动编排闭环和公开 executor 配置尚未实现。
+当前最小闭环为 `verified failure → CapabilityGap → Portfolio → local Skill validation → Governance-approved inactive component → live AgentProgram`。跨多个 gap 的优先级学习、全自动资源调度和 production activation 仍不在本版范围。

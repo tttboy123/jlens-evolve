@@ -37,7 +37,8 @@ best Harness as baseline, compiles the Teacher Candidate, performs real local
 model generation and official matched native evaluation, feeds authoritative
 Claims into the next round, and exports an inactive `BEST-HARNESS.json`.
 
-That command is the sole live orchestration entry. It validates three clean,
+For autonomous Skill evolution, that command is the authoritative live loop. It
+validates three clean,
 revision-pinned feedback checkouts; freezes the local Qwen and official evaluator
 identities; compiles a byte-frozen DeepSeek request/response into an immutable
 `CandidateChangeSet`, Skill, zero-argument Operator and Router; and dispatches
@@ -54,6 +55,13 @@ an `observer_id`, renamed receipt, self-reported hash or model-provided
 `internal_trace` is never sufficient. Before E3 projection, every E2 pair is
 rebuilt from the Receipt Store and its literal receipt kinds/artifacts. Missing
 trusted evidence or receipt replay remains E2.
+
+Every round starts with a hash-bound Qwen/native/Teacher health preflight. A
+failed evaluator is recorded as infrastructure feedback with no gain Claim; it
+does not update BEST, and the configured consecutive-infrastructure threshold
+stops the loop before an unattended batch can spin indefinitely. Resume rebuilds
+state and next-round feedback from the last verified round rather than trusting
+mutable summaries.
 
 Every legal outcome enters Candidate Registry. Governance projects neutral as
 `no_change`, regression as `rejected`, and evaluator infrastructure failure as
@@ -103,4 +111,9 @@ The trace source must create one canonical JSON file named `<plan_id>.json` in
 `concept_scores` object. The secret is never serialized into campaign artifacts.
 
 `legacy-feedback-e2e` remains available only as a historical evidence-import
-compatibility command. See `docs/MIGRATION-v3.md` for authority boundaries.
+compatibility command. Public AgentProgram campaigns support a deterministic
+fixture profile and one allowlisted local live profile. The bounded
+`PortfolioOrchestrator` connects one authoritative AgentProgram failure to an
+inactive validated Capability and a new live tournament without minting Claims
+or activating assets. See `docs/MIGRATION-v3.md` and
+`docs/TRUST-BOUNDARIES.md` for authority and threat boundaries.
