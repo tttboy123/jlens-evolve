@@ -1,6 +1,10 @@
 """Unified public Campaign contract."""
 
-from .agent_program_campaign import run_agent_program_fixture_campaign
+from .agent_program_campaign import (
+    run_agent_program_campaign,
+    run_agent_program_fixture_campaign,
+    run_agent_program_live_campaign,
+)
 from .agent_program_runtime import (
     AgentProgramExecutor,
     HashVerifiedAgentProgramTransport,
@@ -16,6 +20,8 @@ __all__ = [
     "AgentProgramExecutor",
     "HashVerifiedAgentProgramTransport",
     "LegacyImportRuntime",
+    "run_agent_program_campaign",
     "run_agent_program_fixture_campaign",
+    "run_agent_program_live_campaign",
     "run_legacy_import_campaign",
 ]

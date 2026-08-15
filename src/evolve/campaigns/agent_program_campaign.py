@@ -1,4 +1,4 @@
-"""Executable, explicitly fixture-scoped AgentProgram tournament campaign."""
+"""AgentProgram fixture entry point and explicit profile dispatch."""
 
 from __future__ import annotations
 
@@ -38,6 +38,7 @@ from evolve.reporting import AuditVerifier
 from evolve.runtime import ExecutionRuntime
 from evolve.strategies import AgentProgramSearchStrategy, StrategyContext
 
+from .agent_program_live import run_agent_program_live_campaign
 from .runner import CampaignRunner, CampaignSpec
 
 
@@ -303,4 +304,35 @@ def run_agent_program_fixture_campaign(
     return report
 
 
-__all__ = ["run_agent_program_fixture_campaign"]
+def run_agent_program_campaign(
+    *, config_path: Path, output_root: Path
+) -> Mapping[str, Any]:
+    """Dispatch only the explicitly selected AgentProgram execution profile."""
+
+    try:
+        raw = json.loads(config_path.resolve().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ContractViolation("AgentProgram campaign config is unreadable") from error
+    if not isinstance(raw, Mapping):
+        raise ContractViolation("AgentProgram campaign config must be an object")
+    profile = raw.get("execution_profile")
+    if profile == "fixture":
+        return run_agent_program_fixture_campaign(
+            config_path=config_path,
+            output_root=output_root,
+        )
+    if profile == "live":
+        return run_agent_program_live_campaign(
+            config_path=config_path,
+            output_root=output_root,
+        )
+    raise ContractViolation(
+        "AgentProgram campaign config fields are invalid: execution_profile unsupported"
+    )
+
+
+__all__ = [
+    "run_agent_program_campaign",
+    "run_agent_program_fixture_campaign",
+    "run_agent_program_live_campaign",
+]

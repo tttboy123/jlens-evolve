@@ -40,7 +40,7 @@ from evolve.strategies import (
     StrategyStatus,
 )
 
-NOW = datetime(2026, 8, 15, 4, 0, tzinfo=UTC)
+NOW = datetime(2099, 8, 15, 4, 0, tzinfo=UTC)
 
 
 def _revision(

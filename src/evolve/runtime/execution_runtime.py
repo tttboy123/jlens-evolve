@@ -333,7 +333,7 @@ class ExecutionRuntime:
                             "native prediction does not match model artifact"
                         )
                     native_payload["prediction_sha256"] = native_prediction
-                native_payload.update(_native_identity(plan))
+                native_payload.update(native_execution_identity(plan))
                 native_payload.update(
                     {
                         "model_receipt_id": model_receipt.receipt_id,
@@ -366,7 +366,7 @@ class ExecutionRuntime:
             appender.append_fact(
                 "native_evaluation",
                 {
-                    **_native_identity(plan),
+                    **native_execution_identity(plan),
                     "model_receipt_id": model_receipt.receipt_id,
                     "model_artifact_sha256": model_receipt.artifact_sha256,
                     "resolved": False,
@@ -438,20 +438,16 @@ class _ReceiptAppender:
         )
 
     def _append(self, kind: str, payload: Mapping[str, Any]) -> Receipt:
-        artifact = canonical_json(payload).encode("utf-8")
-        artifact_sha256 = hashlib.sha256(artifact).hexdigest()
         sequence = self._next_sequence
-        identity = canonical_json(
-            {
-                "campaign_id": self._plan.campaign_id,
-                "plan_id": self._plan.plan_id,
-                "sequence": sequence,
-                "kind": kind,
-                "artifact_sha256": artifact_sha256,
-            }
-        ).encode("utf-8")
+        artifact, artifact_sha256, receipt_id = runtime_receipt_identity(
+            campaign_id=self._plan.campaign_id,
+            plan_id=self._plan.plan_id,
+            sequence=sequence,
+            kind=kind,
+            payload=payload,
+        )
         receipt = Receipt(
-            receipt_id="receipt-" + hashlib.sha256(identity).hexdigest(),
+            receipt_id=receipt_id,
             campaign_id=self._plan.campaign_id,
             plan_id=self._plan.plan_id,
             sequence=sequence,
@@ -464,6 +460,34 @@ class _ReceiptAppender:
         self._receipts.append(stored)
         self._next_sequence += 1
         return stored
+
+
+def runtime_receipt_identity(
+    *,
+    campaign_id: str,
+    plan_id: str,
+    sequence: int,
+    kind: str,
+    payload: Mapping[str, Any],
+) -> tuple[bytes, str, str]:
+    """Return the canonical artifact bytes, digest, and Runtime receipt ID."""
+
+    artifact = canonical_json(payload).encode("utf-8")
+    artifact_sha256 = hashlib.sha256(artifact).hexdigest()
+    identity = canonical_json(
+        {
+            "campaign_id": campaign_id,
+            "plan_id": plan_id,
+            "sequence": sequence,
+            "kind": kind,
+            "artifact_sha256": artifact_sha256,
+        }
+    ).encode("utf-8")
+    return (
+        artifact,
+        artifact_sha256,
+        "receipt-" + hashlib.sha256(identity).hexdigest(),
+    )
 
 
 def _validated_cost(value: object) -> float:
@@ -506,7 +530,7 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _native_identity(plan: ExecutionPlan) -> dict[str, Any]:
+def native_execution_identity(plan: ExecutionPlan) -> dict[str, Any]:
     """Project the exact matched A/B identity into each native fact."""
 
     config = {

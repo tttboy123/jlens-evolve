@@ -13,6 +13,8 @@ from .execution_runtime import (
     ExecutionInterrupted,
     ExecutionResult,
     ExecutionRuntime,
+    native_execution_identity,
+    runtime_receipt_identity,
 )
 
 __all__ = [
@@ -26,4 +28,6 @@ __all__ = [
     "ReceiptSink",
     "RuntimeEntry",
     "WorkspaceManager",
+    "native_execution_identity",
+    "runtime_receipt_identity",
 ]

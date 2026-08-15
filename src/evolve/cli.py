@@ -12,9 +12,9 @@ from typing import Any
 
 from evolve.alignment import align_native_pair
 from evolve.campaigns import (
-    run_agent_program_fixture_campaign,
     run_legacy_import_campaign,
 )
+from evolve.campaigns.agent_program_campaign import run_agent_program_campaign
 from evolve.contracts import (
     Claim,
     Cohort,
@@ -289,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
             print(canonical_json(result))
             return 0
         if args.campaign_action == "run" and args.strategy == "agent-program":
-            agent_program_result = run_agent_program_fixture_campaign(
+            agent_program_result = run_agent_program_campaign(
                 config_path=args.config.resolve(), output_root=args.output.resolve()
             )
             print(canonical_json(agent_program_result))
