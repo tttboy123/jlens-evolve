@@ -9,6 +9,7 @@ import subprocess
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
+from urllib.parse import urlparse
 
 from evolve.contracts import Cohort, ContractViolation, canonical_json
 from evolve.kernel import BudgetExceeded
@@ -27,6 +28,7 @@ from .goal import GoalRunStatus, GoalState, GoalStateStore
 from .next_round import (
     campaign_failure_facts,
     project_campaign_feedback,
+    project_infrastructure_failure_feedback,
     rebuild_campaign_feedback,
     teacher_task,
 )
@@ -80,6 +82,14 @@ class RoundExecutionRequest:
     candidate: CompiledRevision | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimePreflightResult:
+    """Hash-only identities proving Qwen and native adapters are loadable."""
+
+    qwen_identity_sha256: str
+    native_identity_sha256: str
+
+
 @runtime_checkable
 class EvolutionRoundExecutor(Protocol):
     """External-effect boundary used by the autonomous product loop."""
@@ -89,6 +99,11 @@ class EvolutionRoundExecutor(Protocol):
     def prescreen(self, request: RoundExecutionRequest) -> PrescreenResult: ...
 
     def paired(self, request: RoundExecutionRequest) -> Mapping[str, Any]: ...
+
+
+@runtime_checkable
+class EvolutionRoundPreflight(Protocol):
+    def preflight(self, request: RoundExecutionRequest) -> RuntimePreflightResult: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,6 +331,15 @@ class AutonomousEvolutionRunner:
                 baseline_revision_id=baseline_revision_id,
                 baseline_compiled_root=baseline_root,
             )
+            request_id = f"{self.config.goal.goal_id}-round-{current_round:04d}"
+            freeze_json(
+                round_root / "PREFLIGHT-HEALTH.json",
+                self._preflight_payload(
+                    request=probe_request,
+                    request_id=request_id,
+                    config_sha256=config_identity,
+                ),
+            )
             baseline_path = round_root / "BASELINE-RESULT.json"
             if baseline_path.is_file():
                 baseline = _load_baseline_result(baseline_path)
@@ -354,7 +378,6 @@ class AutonomousEvolutionRunner:
                 },
             }
             freeze_json(round_root / "FAILURE-PACKAGE.json", failure_package)
-            request_id = f"{self.config.goal.goal_id}-round-{current_round:04d}"
             try:
                 proposal = proposer.propose(
                     request_id=request_id,
@@ -373,6 +396,7 @@ class AutonomousEvolutionRunner:
                     phase="teacher-proposal",
                     error=error,
                 )
+            infrastructure_feedback: Mapping[str, Any] | None = None
             try:
                 candidate = self._compile_candidate(
                     proposal=proposal,
@@ -457,24 +481,54 @@ class AutonomousEvolutionRunner:
                         candidate_bundle_sha256=candidate.bundle_sha256,
                     )
             except ContractViolation as error:
-                return self._block_integrity(
-                    state=state,
-                    proposer=proposer,
-                    round_root=round_root,
-                    phase="model-native-lineage",
-                    error=error,
-                )
+                try:
+                    infrastructure_feedback = (
+                        project_infrastructure_failure_feedback(
+                            round_root=round_root,
+                        )
+                    )
+                except ContractViolation:
+                    return self._block_integrity(
+                        state=state,
+                        proposer=proposer,
+                        round_root=round_root,
+                        phase="model-native-lineage",
+                        error=error,
+                    )
+                campaign_result = {
+                    "campaign_id": infrastructure_feedback["campaign_id"],
+                    "campaign_status": "infra_failure",
+                    "execution_statuses": [
+                        row["execution_status"]
+                        for row in infrastructure_feedback[
+                            "infrastructure_failures"
+                        ]
+                    ],
+                    "claims": [],
+                    "capability_active": False,
+                    "holdout_opened": False,
+                    "burned_holdout_opened": False,
+                    "failure_error_type": type(error).__name__,
+                    "failure_error_sha256": hashlib.sha256(
+                        str(error).encode("utf-8")
+                    ).hexdigest(),
+                }
+                claims = ()
             freeze_json(
                 round_root / "CAMPAIGN-RESULT.json", dict(campaign_result)
             )
             claim_rows = [asdict(claim) for claim in claims]
             try:
-                campaign_feedback = project_campaign_feedback(
-                    round_root=round_root,
-                    campaign_result=campaign_result,
-                    claims=claims,
-                    prescreen=_prescreen_payload(prescreen),
-                    candidate_id=candidate.change_set.candidate_id,
+                campaign_feedback = (
+                    dict(infrastructure_feedback)
+                    if infrastructure_feedback is not None
+                    else project_campaign_feedback(
+                        round_root=round_root,
+                        campaign_result=campaign_result,
+                        claims=claims,
+                        prescreen=_prescreen_payload(prescreen),
+                        candidate_id=candidate.change_set.candidate_id,
+                    )
                 )
             except ContractViolation as error:
                 return self._block_integrity(
@@ -503,6 +557,10 @@ class AutonomousEvolutionRunner:
                 else 1
             )
             fitness = _fitness(claims)
+            round_outcome = _round_outcome(
+                claims,
+                infrastructure_failure=infrastructure_feedback is not None,
+            )
             accepted = _acceptable_advance(claims) and (
                 best_fitness is None or fitness > best_fitness
             )
@@ -531,9 +589,7 @@ class AutonomousEvolutionRunner:
                 no_progress = state.no_progress_rounds + 1
                 best_revision = state.best_candidate_revision_id
                 best_bundle = state.best_bundle_sha256
-            infra = bool(claims) and all(
-                claim.classification == "infra_failure" for claim in claims
-            )
+            infra = round_outcome == "infra_failure"
             consecutive_infra = state.consecutive_infra_failures + 1 if infra else 0
             round_payload = {
                 "schema_version": 1,
@@ -548,6 +604,7 @@ class AutonomousEvolutionRunner:
                 "claims": claim_rows,
                 "campaign_feedback": campaign_feedback,
                 "fitness": fitness,
+                "round_outcome": round_outcome,
                 "accepted_as_best": accepted,
                 "best_candidate_revision_id": best_revision,
                 "best_bundle_sha256": best_bundle,
@@ -671,6 +728,70 @@ class AutonomousEvolutionRunner:
             )
         return compiled
 
+    def _preflight_payload(
+        self,
+        *,
+        request: RoundExecutionRequest,
+        request_id: str,
+        config_sha256: str,
+    ) -> dict[str, Any]:
+        if isinstance(self.dependencies.round_executor, EvolutionRoundPreflight):
+            runtime = self.dependencies.round_executor.preflight(request)
+            qwen_mode = "real-runtime"
+            native_mode = "real-runtime"
+        elif self.dependencies.evidence_mode == "test-fixture":
+            executor_identity = _callable_identity(
+                self.dependencies.round_executor
+            )
+            runtime = RuntimePreflightResult(
+                qwen_identity_sha256=_sha256_payload(
+                    {"executor": executor_identity, "component": "qwen"}
+                ),
+                native_identity_sha256=_sha256_payload(
+                    {"executor": executor_identity, "component": "native"}
+                ),
+            )
+            qwen_mode = "injected-test-fixture"
+            native_mode = "injected-test-fixture"
+        else:
+            raise AutonomousEvolutionError(
+                "real autonomous executor does not implement runtime preflight"
+            )
+        _require_sha256(runtime.qwen_identity_sha256, "Qwen preflight identity")
+        _require_sha256(runtime.native_identity_sha256, "native preflight identity")
+        teacher_mode, teacher_identity = _teacher_preflight(
+            config=self.config,
+            transport=self.dependencies.teacher_transport,
+            request_id=request_id,
+            evidence_mode=self.dependencies.evidence_mode,
+        )
+        components = {
+            "teacher": {
+                "status": "healthy",
+                "mode": teacher_mode,
+                "identity_sha256": teacher_identity,
+            },
+            "qwen": {
+                "status": "healthy",
+                "mode": qwen_mode,
+                "identity_sha256": runtime.qwen_identity_sha256,
+            },
+            "native": {
+                "status": "healthy",
+                "mode": native_mode,
+                "identity_sha256": runtime.native_identity_sha256,
+            },
+        }
+        core = {
+            "schema_version": 1,
+            "status": "healthy",
+            "round_index": request.round_index,
+            "selection_id": request.selection.selection_id,
+            "config_sha256": config_sha256,
+            "components": components,
+        }
+        return {**core, "preflight_sha256": _sha256_payload(core)}
+
     def _rebuild_completed_rounds(self, state: GoalState) -> _ReplayState:
         rows = self.round_index.rows()
         if len(rows) not in {state.rounds_completed, state.rounds_completed + 1}:
@@ -697,6 +818,16 @@ class AutonomousEvolutionRunner:
             AuditVerifier().verify_manifest(
                 round_root / "EVIDENCE-MANIFEST.json", root=round_root
             )
+            round_result = _load_json_object(
+                round_root / "AUTONOMOUS-ROUND-RESULT.json"
+            )
+            comparable_result = dict(round_result)
+            if "campaign_feedback" not in payload:
+                comparable_result.pop("campaign_feedback", None)
+            if comparable_result != payload:
+                raise AutonomousEvolutionError(
+                    "round result disagrees with indexed checkpoint"
+                )
             prior = tuple(payload.get("claims", ()))
             historical.extend(prior)
             selection_payload = _load_json_object(round_root / "TASK-SELECTION.json")
@@ -712,11 +843,16 @@ class AutonomousEvolutionRunner:
                 task_selection_counts[task_id] = (
                     task_selection_counts.get(task_id, 0) + 1
                 )
+            rebuilt_campaign_feedback = rebuild_campaign_feedback(
+                round_root=round_root,
+                payload=payload,
+            )
             loaded_campaign_feedback = payload.get("campaign_feedback")
             if loaded_campaign_feedback is None:
-                loaded_campaign_feedback = rebuild_campaign_feedback(
-                    round_root=round_root,
-                    payload=payload,
+                loaded_campaign_feedback = rebuilt_campaign_feedback
+            elif loaded_campaign_feedback != rebuilt_campaign_feedback:
+                raise AutonomousEvolutionError(
+                    "round campaign feedback disagrees with receipts"
                 )
             if not isinstance(loaded_campaign_feedback, Mapping):
                 raise AutonomousEvolutionError(
@@ -737,9 +873,13 @@ class AutonomousEvolutionRunner:
                 best_round_payload = dict(payload)
             else:
                 rejected.append(str(payload["candidate_id"]))
-        if len(rows) == state.rounds_completed + 1:
-            state = self._recover_state_from_rounds(state, rows)
-            self.state_store.write(state)
+        if rows:
+            recovered = self._recover_state_from_rounds(state, rows)
+            if len(rows) == state.rounds_completed + 1:
+                state = recovered
+                self.state_store.write(state)
+            else:
+                _validate_checkpoint_state(state, recovered)
         return _ReplayState(
             state=state,
             prior_claims=prior,
@@ -817,10 +957,12 @@ class AutonomousEvolutionRunner:
                 break
             tail_same_failure += 1
         for row in reversed(rows):
-            claims = row["payload"].get("claims", ())
-            if claims and all(
-                claim.get("classification") == "infra_failure" for claim in claims
-            ):
+            payload = row["payload"]
+            claims = payload.get("claims", ())
+            outcome = payload.get("round_outcome")
+            if outcome is None:
+                outcome = _round_outcome_rows(claims)
+            if outcome == "infra_failure":
                 tail_infra += 1
             else:
                 break
@@ -853,6 +995,8 @@ class AutonomousEvolutionRunner:
                 recovered,
                 status=GoalRunStatus.MAX_SAME_FAILURE_SIGNATURE,
             )
+        if len(rows) >= self.config.goal.max_rounds:
+            return replace(recovered, status=GoalRunStatus.MAX_ROUNDS_REACHED)
         return recovered
 
     def _terminal_result(self, state: GoalState) -> dict[str, Any]:
@@ -947,6 +1091,135 @@ def _directory_size(root: Path) -> int:
         if path.is_file():
             total += path.stat().st_size
     return total
+
+
+def _sha256_payload(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _require_sha256(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise AutonomousEvolutionError(f"{field} is invalid")
+    return value
+
+
+def _callable_identity(value: object) -> str:
+    value_type = type(value)
+    return f"{value_type.__module__}.{value_type.__qualname__}"
+
+
+def _teacher_preflight(
+    *,
+    config: AutonomousEvolutionConfig,
+    transport: Transport,
+    request_id: str,
+    evidence_mode: str,
+) -> tuple[str, str]:
+    if not callable(transport):
+        raise AutonomousEvolutionError("Teacher transport is not callable")
+    payload: dict[str, Any]
+    if evidence_mode == "test-fixture":
+        payload = {
+            "component": "teacher",
+            "mode": "injected-test-fixture",
+            "transport": _callable_identity(transport),
+            "provider": config.teacher.provider,
+            "model": config.teacher.model,
+        }
+        return "injected-test-fixture", _sha256_payload(payload)
+    provider = config.teacher.provider.casefold()
+    if provider in {"frozen", "frozen-replay"}:
+        pair = Path(config.teacher.endpoint).expanduser().resolve() / request_id
+        request_path = pair / "TEACHER-REQUEST.json"
+        response_path = pair / "TEACHER-RESPONSE.json"
+        if not request_path.is_file() or not response_path.is_file():
+            raise AutonomousEvolutionError(
+                "Teacher frozen replay pair failed preflight"
+            )
+        payload = {
+            "component": "teacher",
+            "mode": "frozen-replay",
+            "request_sha256": file_sha256(request_path),
+            "response_sha256": file_sha256(response_path),
+            "provider": provider,
+            "model": config.teacher.model,
+        }
+        return "frozen-replay", _sha256_payload(payload)
+    endpoint = urlparse(config.teacher.endpoint)
+    if endpoint.scheme not in {"http", "https"} or not endpoint.netloc:
+        raise AutonomousEvolutionError("Teacher endpoint failed preflight")
+    if not os.environ.get(config.teacher.api_key_env):
+        raise AutonomousEvolutionError("Teacher credential failed preflight")
+    payload = {
+        "component": "teacher",
+        "mode": "live-remote",
+        "provider": provider,
+        "model": config.teacher.model,
+        "endpoint": config.teacher.endpoint,
+        "api_key_env": config.teacher.api_key_env,
+        "credential_present": True,
+        "transport": _callable_identity(transport),
+    }
+    return "live-remote", _sha256_payload(payload)
+
+
+def _round_outcome(
+    claims: Sequence[VerifiedCampaignClaim], *, infrastructure_failure: bool = False
+) -> str:
+    if infrastructure_failure or any(
+        claim.classification == "infra_failure" for claim in claims
+    ):
+        return "infra_failure"
+    if any(claim.classification == "regression" for claim in claims):
+        return "regression"
+    if any(claim.classification == "gain" for claim in claims):
+        return "gain"
+    return "neutral"
+
+
+def _round_outcome_rows(claims: object) -> str:
+    if not isinstance(claims, (list, tuple)):
+        raise AutonomousEvolutionError("checkpoint claims are invalid")
+    classifications: list[str] = []
+    for claim in claims:
+        if not isinstance(claim, Mapping):
+            raise AutonomousEvolutionError("checkpoint claim is invalid")
+        classification = claim.get("classification")
+        if not isinstance(classification, str):
+            raise AutonomousEvolutionError("checkpoint claim classification is invalid")
+        classifications.append(classification)
+    if "infra_failure" in classifications:
+        return "infra_failure"
+    if "regression" in classifications:
+        return "regression"
+    if "gain" in classifications:
+        return "gain"
+    return "neutral"
+
+
+def _validate_checkpoint_state(state: GoalState, recovered: GoalState) -> None:
+    state_payload = asdict(state)
+    recovered_payload = asdict(recovered)
+    actual_status = state_payload.pop("status")
+    expected_status = recovered_payload.pop("status")
+    if state_payload != recovered_payload:
+        raise AutonomousEvolutionError(
+            "evolution state disagrees with verified round checkpoint"
+        )
+    externally_terminal = {
+        GoalRunStatus.BUDGET_EXHAUSTED,
+        GoalRunStatus.DISK_LIMIT,
+        GoalRunStatus.STOPPED_BY_USER,
+        GoalRunStatus.BLOCKED_INTEGRITY,
+    }
+    if state.status not in externally_terminal and actual_status != expected_status:
+        raise AutonomousEvolutionError(
+            "evolution status disagrees with verified round checkpoint"
+        )
 
 
 def _selection_payload(selection: TaskSelection) -> dict[str, Any]:
@@ -1155,5 +1428,6 @@ __all__ = [
     "EvolutionRoundExecutor",
     "PrescreenResult",
     "RoundExecutionRequest",
+    "RuntimePreflightResult",
     "build_default_dependencies",
 ]

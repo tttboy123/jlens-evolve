@@ -11,6 +11,7 @@ from typing import Any, Mapping
 import pytest
 
 from evolve.autonomous import (
+    AutonomousEvolutionError,
     BaselineProbeResult,
     EvolutionDependencies,
     PrescreenResult,
@@ -44,7 +45,7 @@ from evolve.observers import (
 )
 from evolve.proposals import PricingCnyPerMillionTokens
 from evolve.registry import CandidateRegistry, CapabilityRegistry, RejectedRegistry
-from evolve.runtime import ExecutionRuntime
+from evolve.runtime import EvaluatorInfrastructureError, ExecutionRuntime
 from evolve.strategies import SkillPairedStrategy
 
 NOW = datetime(2026, 8, 14, 10, 0, tzinfo=UTC)
@@ -234,6 +235,17 @@ class FixtureNative:
         }
 
 
+class MixedInfrastructureFixtureNative(FixtureNative):
+    def __init__(self, round_index: int, failing_task_id: str) -> None:
+        super().__init__(round_index)
+        self.failing_task_id = failing_task_id
+
+    def evaluate(self, plan, workspace, model_output):
+        if plan.task.task_id == self.failing_task_id:
+            raise EvaluatorInfrastructureError("fixture evaluator unavailable")
+        return super().evaluate(plan, workspace, model_output)
+
+
 def _tasks(request: RoundExecutionRequest) -> tuple[TaskRevision, ...]:
     return tuple(
         TaskRevision(
@@ -266,6 +278,9 @@ class ExecutableFixtureRoundExecutor:
 
     def model_transport(self, request: RoundExecutionRequest) -> FixtureModel:
         return FixtureModel(request)
+
+    def native_evaluator(self, request: RoundExecutionRequest) -> FixtureNative:
+        return FixtureNative(request.round_index)
 
     def baseline(self, request: RoundExecutionRequest) -> BaselineProbeResult:
         task_ids = tuple(task.task_id for task in _tasks(request))
@@ -306,7 +321,7 @@ class ExecutableFixtureRoundExecutor:
         runtime = ExecutionRuntime(
             model_transport=self.model_transport(request),
             workspace_manager=FixtureWorkspace(),
-            native_evaluator=FixtureNative(request.round_index),
+            native_evaluator=self.native_evaluator(request),
             observer_hub=ObserverHub(
                 (ExternalTraceObserver(), CostObserver()), graph=graph
             ),
@@ -381,7 +396,7 @@ class ExecutableFixtureRoundExecutor:
             authorization=authorization,
             model_transport=self.model_transport(request),
             workspace_manager=FixtureWorkspace(),
-            native_evaluator=FixtureNative(request.round_index),
+            native_evaluator=self.native_evaluator(request),
             receipt_store=store,
             observer_hub=observer,
             claim_engine=ClaimEngine(graph),
@@ -493,6 +508,16 @@ class TamperingFixtureRoundExecutor(ExecutableFixtureRoundExecutor):
         claims[0]["task_revision_id"] = "forged-task-revision"
         result["claims"] = claims
         return result
+
+
+class MixedInfrastructureFixtureRoundExecutor(ExecutableFixtureRoundExecutor):
+    def native_evaluator(
+        self, request: RoundExecutionRequest
+    ) -> MixedInfrastructureFixtureNative:
+        return MixedInfrastructureFixtureNative(
+            request.round_index,
+            request.selection.selected_task_ids[0],
+        )
 
 
 class PhaseInterruptingRoundExecutor:
@@ -617,6 +642,13 @@ def test_public_cli_runs_two_real_feedback_rounds_and_replays_without_calls(
         "offline_e2e_verified"
     )
     first_round = output / "rounds/round-0000"
+    preflight = json.loads((first_round / "PREFLIGHT-HEALTH.json").read_text())
+    assert preflight["status"] == "healthy"
+    assert set(preflight["components"]) == {"teacher", "qwen", "native"}
+    assert all(
+        len(component["identity_sha256"]) == 64
+        for component in preflight["components"].values()
+    )
     assert (first_round / "TEACHER-REQUEST.json").is_file()
     assert (first_round / "TEACHER-RESPONSE.json").is_file()
     assert (first_round / "CAMPAIGN-RESULT.json").is_file()
@@ -1255,6 +1287,125 @@ def test_public_cli_stops_on_repeated_failure_signature_without_waiting(
     result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
     assert result["status"] == "max_same_failure_signature"
     assert result["rounds_completed"] == 1
+    assert len(teacher_requests) == 1
+
+
+def test_public_cli_stops_on_authoritative_infra_failures_and_recovers_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from evolve.autonomous.goal import GoalStateStore
+
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=MixedInfrastructureFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    config_path = _config(tmp_path)
+    config = json.loads(config_path.read_text())
+    config["goal"].update(
+        {
+            "target_native_gains": 99,
+            "max_rounds": 10,
+            "no_progress_patience": 10,
+            "max_same_failure_signature": 10,
+            "max_consecutive_infra_failures": 2,
+        }
+    )
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    original_write = GoalStateStore.write
+    interrupted = False
+
+    def interrupt_after_first_checkpoint(self, state):
+        nonlocal interrupted
+        if state.rounds_completed == 1 and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt("after first infra checkpoint")
+        return original_write(self, state)
+
+    monkeypatch.setattr(GoalStateStore, "write", interrupt_after_first_checkpoint)
+    output = tmp_path / "infra-threshold-resume"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(config_path),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+
+    with pytest.raises(KeyboardInterrupt):
+        main(argv)
+    assert main(argv) == 0
+
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    state = json.loads((output / "EVOLUTION-STATE.json").read_text())
+    assert result["status"] == "max_consecutive_infra_failures"
+    assert result["rounds_completed"] == 2
+    assert result["native_gain_task_ids"] == []
+    assert result["best_candidate_revision_id"] is None
+    assert state["consecutive_infra_failures"] == 2
+    assert len(teacher_requests) == 2
+    resumed_failure_package = teacher_requests[1]["failure_package"]
+    assert isinstance(resumed_failure_package, dict)
+    prior_feedback = resumed_failure_package["prior_campaign_feedback"]
+    assert isinstance(prior_feedback, dict)
+    assert prior_feedback["campaign_status"] == "infra_failure"
+    assert prior_feedback["infrastructure_failures"]
+    for round_index in range(2):
+        round_result = json.loads(
+            (
+                output
+                / f"rounds/round-{round_index:04d}/AUTONOMOUS-ROUND-RESULT.json"
+            ).read_text()
+        )
+        assert round_result["round_outcome"] == "infra_failure"
+        assert round_result["accepted_as_best"] is False
+        assert round_result["claims"] == []
+        assert round_result["campaign_feedback"]["infrastructure_failures"]
+
+
+def test_public_cli_rejects_tampered_preflight_before_external_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+    executor = PhaseInterruptingRoundExecutor("candidate-compiled")
+    dependencies = EvolutionDependencies(
+        teacher_transport=lambda request: _teacher(teacher_requests, request),
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=executor,
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    output = tmp_path / "preflight-tamper"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(_config(tmp_path)),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+    with pytest.raises(KeyboardInterrupt):
+        main(argv)
+    assert len(teacher_requests) == 1
+    preflight_path = output / "rounds/round-0000/PREFLIGHT-HEALTH.json"
+    preflight = json.loads(preflight_path.read_text())
+    preflight["components"]["qwen"]["identity_sha256"] = "0" * 64
+    preflight_path.write_text(json.dumps(preflight), encoding="utf-8")
+
+    with pytest.raises(AutonomousEvolutionError, match="immutable .* artifact"):
+        main(argv)
     assert len(teacher_requests) == 1
 
 

@@ -18,6 +18,7 @@ from .runner import (
     EvolutionRoundExecutor,
     PrescreenResult,
     RoundExecutionRequest,
+    RuntimePreflightResult,
     build_default_dependencies,
 )
 from .task_selector import FeedbackTaskSelector, TaskSelection, TaskSelectionContext
@@ -38,6 +39,7 @@ __all__ = [
     "ModelConfig",
     "PrescreenResult",
     "RoundExecutionRequest",
+    "RuntimePreflightResult",
     "SweBenchConfig",
     "TaskSelection",
     "TaskSelectionContext",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
 import json
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -13,6 +15,7 @@ from evolve.contracts import (
     Authorization,
     Cohort,
     ExecutionLimits,
+    canonical_json,
 )
 from evolve.evidence import EvidenceGraph, ReceiptStore
 from evolve.fresh_feedback import (
@@ -42,11 +45,70 @@ from .runner import (
     BaselineProbeResult,
     PrescreenResult,
     RoundExecutionRequest,
+    RuntimePreflightResult,
 )
 
 
 class FreshFeedbackRoundExecutor:
     """Execute every external effect through existing v3 Runtime authorities."""
+
+    def preflight(self, request: RoundExecutionRequest) -> RuntimePreflightResult:
+        runtime = _runtime_metadata(request)
+        environment = self._environment(
+            request, request.output_root / ".preflight-native"
+        )
+        self._qwen_runner(
+            request,
+            candidate_root=request.output_root / ".preflight-no-candidate",
+        )
+        legacy_root = Path(str(runtime["legacy_root"])).expanduser().resolve()
+        for relative in (
+            "skill_evolution_loop/operator_student.py",
+            "skill_evolution_loop/span_student.py",
+        ):
+            if not (legacy_root / relative).is_file():
+                raise AutonomousEvolutionError(
+                    "local Qwen implementation failed preflight"
+                )
+        if importlib.util.find_spec("mlx_lm") is None:
+            raise AutonomousEvolutionError(
+                "local Qwen dependency failed preflight"
+            )
+        for name in ("swe_python", "multi_python"):
+            if not Path(str(runtime[name])).expanduser().resolve().is_file():
+                raise AutonomousEvolutionError(
+                    f"native evaluator interpreter failed preflight: {name}"
+                )
+        qwen_identity = _identity_sha256(
+            {
+                "legacy_root": str(legacy_root),
+                "model_path": str(request.config.model.model_path),
+                "task_pool_sha256": _file_sha256(
+                    request.config.swe_bench.task_pool
+                ),
+                "routes_sha256": _file_sha256(Path(str(runtime["routes_path"]))),
+                "selected_task_revision_ids": [
+                    task.revision_id for task in environment.tasks
+                ],
+            }
+        )
+        native_identity = _identity_sha256(
+            {
+                "evaluator_id": environment.evaluator.evaluator_id,
+                "official_evaluator_sha256": _file_sha256(
+                    request.config.swe_bench.official_evaluator
+                ),
+                "swe_python": str(Path(str(runtime["swe_python"])).resolve()),
+                "multi_python": str(Path(str(runtime["multi_python"])).resolve()),
+                "selected_task_revision_ids": [
+                    task.revision_id for task in environment.tasks
+                ],
+            }
+        )
+        return RuntimePreflightResult(
+            qwen_identity_sha256=qwen_identity,
+            native_identity_sha256=native_identity,
+        )
 
     def baseline(self, request: RoundExecutionRequest) -> BaselineProbeResult:
         environment = self._environment(request, request.output_root / "baseline-probe")
@@ -421,6 +483,14 @@ def _generation_config(request: RoundExecutionRequest) -> dict[str, Any]:
         "max_tokens": 1536,
         "max_context_tokens": 24000,
     }
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _identity_sha256(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 __all__ = ["FreshFeedbackRoundExecutor"]

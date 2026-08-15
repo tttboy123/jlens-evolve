@@ -58,6 +58,8 @@ def rebuild_campaign_feedback(
     campaign_status = campaign_result.get("campaign_status")
     if campaign_status == "screened_out":
         claims: tuple[VerifiedCampaignClaim, ...] = ()
+    elif campaign_status == "infra_failure":
+        return project_infrastructure_failure_feedback(round_root=round_root)
     elif campaign_status == "completed":
         selection = _load_json_object(round_root / "TASK-SELECTION.json")
         selected_task_ids = selection.get("selected_task_ids")
@@ -88,6 +90,93 @@ def rebuild_campaign_feedback(
         prescreen=prescreen,
         candidate_id=_required_text(payload.get("candidate_id"), "candidate id"),
     )
+
+
+def project_infrastructure_failure_feedback(*, round_root: Path) -> dict[str, Any]:
+    """Project only receipt-bound evaluator failures from an interrupted campaign."""
+
+    receipt_store = ReceiptStore(round_root / "receipt-store")
+    receipts = receipt_store.list_receipts()
+    if not receipts:
+        raise AutonomousEvolutionError(
+            "infrastructure failure has no authoritative receipts"
+        )
+    campaign_ids = {receipt.campaign_id for receipt in receipts}
+    if len(campaign_ids) != 1:
+        raise AutonomousEvolutionError(
+            "infrastructure failure campaign identity is ambiguous"
+        )
+    try:
+        from evolve.evidence import EvidenceGraph
+
+        EvidenceGraph.rebuild(round_root / "evidence-graph", receipt_store)
+    except Exception as error:
+        raise AutonomousEvolutionError(
+            "infrastructure failure evidence replay failed"
+        ) from error
+    by_plan: dict[str, list[Any]] = {}
+    for receipt in receipts:
+        by_plan.setdefault(receipt.plan_id, []).append(receipt)
+    failures: list[dict[str, Any]] = []
+    for plan_id, plan_receipts in sorted(by_plan.items()):
+        native = next(
+            (
+                receipt
+                for receipt in plan_receipts
+                if receipt.kind == "native_evaluation"
+                and receipt.payload.get("evaluator_error") not in (None, "")
+            ),
+            None,
+        )
+        if native is None:
+            continue
+        model = _only_receipt(plan_receipts, "model", plan_id)
+        terminal = _only_receipt(plan_receipts, "execution_terminal", plan_id)
+        if (
+            native.payload.get("model_receipt_id") != model.receipt_id
+            or native.payload.get("model_artifact_sha256") != model.artifact_sha256
+            or native.payload.get("task_revision_id")
+            != model.payload.get("task_revision_id")
+            or native.payload.get("arm") != model.payload.get("arm")
+            or terminal.payload.get("status") != "infra_failure"
+        ):
+            raise AutonomousEvolutionError(
+                "infrastructure failure receipt lineage is inconsistent"
+            )
+        evaluator_error, raw_sha256 = _failure_category(
+            native.payload.get("evaluator_error"), "evaluator error"
+        )
+        failures.append(
+            {
+                "plan_id": plan_id,
+                "task_revision_id": _required_text(
+                    model.payload.get("task_revision_id"), "model task revision"
+                ),
+                "arm": _required_text(model.payload.get("arm"), "model arm"),
+                "execution_status": "infra_failure",
+                "model_receipt_id": model.receipt_id,
+                "model_receipt_sha256": model.content_sha256,
+                "model_artifact_sha256": model.artifact_sha256,
+                "native_receipt_id": native.receipt_id,
+                "native_receipt_sha256": native.content_sha256,
+                "native_artifact_sha256": native.artifact_sha256,
+                "execution_terminal_receipt_id": terminal.receipt_id,
+                "execution_terminal_receipt_sha256": terminal.content_sha256,
+                "evaluator_error": evaluator_error,
+                "evaluator_error_raw_sha256": raw_sha256,
+            }
+        )
+    if not failures:
+        raise AutonomousEvolutionError(
+            "campaign failure is not an authoritative evaluator failure"
+        )
+    return {
+        "schema_version": 1,
+        "campaign_id": next(iter(campaign_ids)),
+        "campaign_status": "infra_failure",
+        "task_pairs": [],
+        "infrastructure_failures": failures,
+    }
 
 
 def project_campaign_feedback(
@@ -345,6 +434,25 @@ def campaign_failure_facts(
                 }
             }
         )
+    failures = campaign_feedback.get("infrastructure_failures")
+    if isinstance(failures, Sequence):
+        for failure in failures:
+            if not isinstance(failure, Mapping):
+                continue
+            facts.append(
+                {
+                    "infrastructure_failure": {
+                        field: failure.get(field)
+                        for field in (
+                            "task_revision_id",
+                            "arm",
+                            "execution_status",
+                            "evaluator_error",
+                            "evaluator_error_raw_sha256",
+                        )
+                    }
+                }
+            )
     return facts
 
 
@@ -516,6 +624,7 @@ def _failure_category(value: Any, field: str) -> tuple[str | None, str | None]:
 __all__ = [
     "campaign_failure_facts",
     "project_campaign_feedback",
+    "project_infrastructure_failure_feedback",
     "rebuild_campaign_feedback",
     "teacher_task",
 ]
