@@ -32,13 +32,13 @@
   "unused_v3_stubs_found": false,
   "post_cleanup_inventory": {
     "source_python_files": 69,
-    "source_python_lines": 20430,
+    "source_python_lines": 20451,
     "test_python_files": 28,
-    "test_python_lines": 12312
+    "test_python_lines": 12364
   },
   "verification": {
     "targeted": "passed",
-    "pytest_full": "257 passed",
+    "pytest_full": "258 passed",
     "ruff": "passed",
     "mypy": "passed (69 source files)",
     "git_diff_check": "passed"

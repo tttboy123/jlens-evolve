@@ -37,10 +37,10 @@ reader was deleted. No model cache, credential or Docker layer is tracked.
 
 ## Post-cleanup inventory and verification
 
-- Source Python: 69 files, 20,430 lines.
-- Test Python: 28 files, 12,312 lines.
+- Source Python: 69 files, 20,451 lines.
+- Test Python: 28 files, 12,364 lines.
 - Targeted AgentProgram/Portfolio/autonomous suites: passed.
-- Final integrated suite: 257 passed.
+- Final integrated suite: 258 passed.
 - Ruff: passed for `src` and `tests`.
 - mypy: passed for 69 source files.
 - `git diff --check`: passed.
