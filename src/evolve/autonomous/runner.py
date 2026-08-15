@@ -430,6 +430,18 @@ class AutonomousEvolutionRunner:
                     "compiled_bundle_sha256": candidate.bundle_sha256,
                 },
             )
+            if not set(selection.selected_task_ids).issubset(
+                dict(candidate.router.routes)
+            ):
+                return self._block_integrity(
+                    state=state,
+                    proposer=proposer,
+                    round_root=round_root,
+                    phase="candidate-compilation",
+                    error=AutonomousEvolutionError(
+                        "compiled Teacher Router does not cover selected feedback tasks"
+                    ),
+                )
             for name, _ in candidate.artifact_sha256:
                 _freeze_copy(candidate.root / name, round_root / name)
             _freeze_copy(candidate.manifest_path, round_root / candidate.manifest_path.name)
@@ -722,10 +734,6 @@ class AutonomousEvolutionRunner:
             compile_spec=compile_spec,
             output_root=round_root / "compiled-candidates",
         )
-        if not set(selection.selected_task_ids).issubset(dict(compiled.router.routes)):
-            raise AutonomousEvolutionError(
-                "compiled Teacher Router does not cover selected feedback tasks"
-            )
         return compiled
 
     def _preflight_payload(

@@ -677,6 +677,89 @@ def test_public_cli_runs_two_real_feedback_rounds_and_replays_without_calls(
     assert len(teacher_requests) == 2
 
 
+def test_router_coverage_failure_records_paid_teacher_call_before_idempotent_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+
+    def incomplete_router_teacher(request: dict[str, object]) -> dict[str, object]:
+        raw = _teacher(teacher_requests, request)
+        choices = raw["choices"]
+        assert isinstance(choices, list)
+        message = choices[0]["message"]
+        assert isinstance(message, dict)
+        content = json.loads(str(message["content"]))
+        routes = content["router"]["routes"]
+        routes.pop(next(iter(routes)))
+        message["content"] = json.dumps(content)
+        return raw
+
+    dependencies = EvolutionDependencies(
+        teacher_transport=incomplete_router_teacher,
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    output = tmp_path / "router-coverage-failure"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(_config(tmp_path)),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+
+    assert main(argv) == 0
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "blocked_integrity"
+    block = json.loads(
+        (output / "rounds/round-0000/INTEGRITY-BLOCK.json").read_text()
+    )
+    assert block["phase"] == "candidate-compilation"
+    assert len(teacher_requests) == 1
+    compiled_manifests = list(
+        (output / "rounds/round-0000/compiled-candidates").glob(
+            "*/COMPILED-REVISION.json"
+        )
+    )
+    assert len(compiled_manifests) == 1
+    teacher_ledger = output / "TEACHER-CALL-LEDGER.jsonl"
+    cost_ledger = output / "teacher/COST-LEDGER.jsonl"
+    ledger_before = teacher_ledger.read_bytes()
+    cost_before = cost_ledger.read_bytes()
+    assert len(ledger_before.splitlines()) == 1
+    call = json.loads(ledger_before)
+    call_payload = call["payload"]
+    compiled = json.loads(compiled_manifests[0].read_text())
+    normalized_response = output / call_payload["response_path"]
+    normalized = json.loads(normalized_response.read_text())
+    raw_response = normalized_response.with_name("TEACHER-RAW-RESPONSE.json")
+    assert call_payload["request_sha256"] == _sha(
+        (output / call_payload["request_path"]).read_text()
+    )
+    assert call_payload["response_sha256"] == hashlib.sha256(
+        normalized_response.read_bytes()
+    ).hexdigest()
+    assert normalized["raw_response_sha256"] == hashlib.sha256(
+        raw_response.read_bytes()
+    ).hexdigest()
+    assert call_payload["candidate_revision_id"] == compiled["revision_id"]
+    assert call_payload["compiled_bundle_sha256"] == hashlib.sha256(
+        compiled_manifests[0].read_bytes()
+    ).hexdigest()
+
+    assert main(argv) == 0
+    assert len(teacher_requests) == 1
+    assert teacher_ledger.read_bytes() == ledger_before
+    assert cost_ledger.read_bytes() == cost_before
+
+
 def test_public_cli_selection_binds_complete_history_and_resume_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
