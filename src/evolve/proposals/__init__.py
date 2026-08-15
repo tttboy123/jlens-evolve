@@ -147,6 +147,29 @@ def _freeze_request(path: Path, payload: Mapping[str, Any]) -> None:
     _atomic_write(path, payload)
 
 
+def _contains_prohibited_teacher_data(value: object) -> bool:
+    """Reject protected fields and path leaks without scanning safe goal prose."""
+
+    protected = ("gold", "reference_patch", "holdout")
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if any(term in str(key).casefold() for term in protected):
+                return True
+            if _contains_prohibited_teacher_data(nested):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(_contains_prohibited_teacher_data(item) for item in value)
+    if isinstance(value, str):
+        segments = {
+            segment
+            for segment in value.casefold().replace("\\", "/").split("/")
+            if segment
+        }
+        return bool(set(protected) & segments)
+    return False
+
+
 class CandidateProposer:
     """Reserve cost, dispatch once, and freeze request/response/usage."""
 
@@ -183,9 +206,7 @@ class CandidateProposer:
         failure_package: dict[str, object],
         max_output_tokens: int,
     ) -> ProposalResult:
-        serialized = canonical_json(failure_package)
-        lowered = serialized.casefold()
-        if any(term in lowered for term in ('"gold"', "reference_patch", "holdout")):
+        if _contains_prohibited_teacher_data(failure_package):
             raise ContractViolation(
                 "teacher package contains prohibited leakage fields"
             )

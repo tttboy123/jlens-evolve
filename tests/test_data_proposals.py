@@ -186,6 +186,58 @@ def test_teacher_proposer_stops_before_dispatch_when_reservation_can_exceed_budg
         )
 
 
+def test_teacher_leakage_gate_allows_safety_prose_but_rejects_protected_fields(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def transport(_request: dict[str, object]) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        return {
+            "model": "deepseek-v4-flash",
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "protocol": "typed-operator-plan-v1",
+                                "prompt_template": "Return one operator plan.",
+                                "skill_text": "Preserve unrelated behavior.",
+                                "eval_note": "Validate with native matched A/B.",
+                            }
+                        )
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+        }
+
+    proposer = CandidateProposer(
+        root=tmp_path / "teacher",
+        provider="deepseek",
+        model="deepseek-v4-flash",
+        transport=transport,
+        pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        hard_budget_cny=10.0,
+    )
+    proposer.propose(
+        request_id="safe-prose",
+        failure_package={
+            "goal": "Use feedback only without opening holdout data.",
+            "failures": ["unresolved"],
+        },
+        max_output_tokens=1000,
+    )
+    with pytest.raises(ContractViolation, match="prohibited leakage"):
+        proposer.propose(
+            request_id="protected-field",
+            failure_package={"reference_patch": "secret"},
+            max_output_tokens=1000,
+        )
+    assert calls == 1
+
+
 def test_teacher_proposer_never_redispatches_unreconciled_reservation(
     tmp_path: Path,
 ) -> None:
