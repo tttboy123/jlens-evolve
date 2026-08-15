@@ -430,6 +430,33 @@ class AutonomousEvolutionRunner:
                     "compiled_bundle_sha256": candidate.bundle_sha256,
                 },
             )
+            synthesized_task_ids = candidate.change_set.synthesized_task_ids
+            if synthesized_task_ids:
+                freeze_json(
+                    round_root / "ROUTER-REPAIR.json",
+                    {
+                        "schema_version": 1,
+                        "round_index": current_round,
+                        "candidate_id": candidate.change_set.candidate_id,
+                        "candidate_revision_id": candidate.change_set.revision_id,
+                        "compiled_bundle_sha256": candidate.bundle_sha256,
+                        "route_operator_id": (
+                            candidate.router.routes[0][1]
+                            if candidate.router.routes
+                            else ""
+                        ),
+                        "teacher_routed_task_ids": [
+                            task_id
+                            for task_id in selection.selected_task_ids
+                            if task_id not in set(synthesized_task_ids)
+                        ],
+                        "synthesized_task_ids": list(synthesized_task_ids),
+                        "source": (
+                            "deterministic Router repair of a schema-valid "
+                            "Teacher response; no additional paid call"
+                        ),
+                    },
+                )
             if not set(selection.selected_task_ids).issubset(
                 dict(candidate.router.routes)
             ):
@@ -713,6 +740,7 @@ class AutonomousEvolutionRunner:
             revision_id=revision_id,
             parent_revision_id=parent_revision_id,
             cohort=Cohort.FEEDBACK,
+            required_route_task_ids=tuple(selection.selected_task_ids),
         )
         if not isinstance(operator, Mapping):
             operator_id = f"operator-{candidate.candidate_id[-16:]}"

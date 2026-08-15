@@ -164,6 +164,36 @@ from authoritative model, external-trace and native receipts. The next round
 carries it unchanged as `prior_campaign_feedback`; patch bytes, prompts and
 unrecognized raw error text are not sent to the Teacher.
 
+## Teacher Router coverage
+
+Every Teacher request requires the Candidate Router to cover every selected
+feedback task (`router must cover every selected feedback task` in the frozen
+request constraints). The authoritative selected-task list is bound into the
+compile via `CompileSpec.required_route_task_ids`, so the requirement is part
+of the compiled revision lineage.
+
+If a schema-valid Teacher response returns a Router that covers only a subset,
+the framework does not waste the paid call and does not stop. Compilation
+deterministically synthesizes the missing routes to the Candidate's own
+Operator, and the round continues into real taught execution; the native
+results decide whether the candidate is useful on those tasks. The repair is
+never silent:
+
+- `CANDIDATE-CHANGESET.json` records `synthesized_task_ids` (empty and omitted
+  when no repair happened, so previously sealed bundles keep their exact hash).
+- `COMPILE-SPEC.json` records `required_route_task_ids`.
+- `COMPILED-ROUTER.json` contains the repaired full route set.
+- `rounds/round-XXXX/ROUTER-REPAIR.json` summarizes the Teacher-routed versus
+  synthesized task IDs, the route Operator and the compiled bundle hash, and is
+  sealed into that round's manifest.
+- The Teacher's paid request/response is never mutated; the raw response hash
+  in the call index and cost ledger remains the original.
+
+The fail-closed gate is unchanged for genuinely invalid Routers: an empty,
+malformed, or cross-Operator Router still raises a contract violation and
+stops the round as `blocked_integrity` with the charge recorded in the durable
+cost ledger.
+
 ## Stop conditions and safety
 
 The loop stops only for `goal_reached`, `max_rounds_reached`, `no_progress`,

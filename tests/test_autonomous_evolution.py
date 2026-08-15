@@ -677,9 +677,17 @@ def test_public_cli_runs_two_real_feedback_rounds_and_replays_without_calls(
     assert len(teacher_requests) == 2
 
 
-def test_router_coverage_failure_records_paid_teacher_call_before_idempotent_resume(
+def test_router_coverage_repair_records_paid_call_and_resumes_without_duplicates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A schema-valid but under-covered Router is repaired, not blocked.
+
+    The Teacher response stays untouched; the compiled Router is deterministically
+    extended to every selected feedback task so the paid call still produces a
+    real taught campaign. The fail-closed gate remains for genuinely invalid
+    Routers (covered by the following test).
+    """
+
     worktree = _clean_worktree(tmp_path)
     teacher_requests: list[dict[str, object]] = []
 
@@ -697,6 +705,109 @@ def test_router_coverage_failure_records_paid_teacher_call_before_idempotent_res
 
     dependencies = EvolutionDependencies(
         teacher_transport=incomplete_router_teacher,
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=ExecutableFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    output = tmp_path / "router-coverage-repair"
+    argv = [
+        "autonomous-evolve",
+        "--config",
+        str(_config(tmp_path)),
+        "--output",
+        str(output),
+        "--worktree-root",
+        str(worktree),
+    ]
+
+    assert main(argv) == 0
+    result = json.loads((output / "EVOLUTION-RESULT.json").read_text())
+    assert result["status"] == "goal_reached"
+    assert result["rounds_completed"] == 2
+    assert len(teacher_requests) == 2
+    assert not (output / "rounds/round-0001/INTEGRITY-BLOCK.json").is_file()
+
+    repair = json.loads(
+        (output / "rounds/round-0001/ROUTER-REPAIR.json").read_text()
+    )
+    assert repair["schema_version"] == 1
+    assert repair["round_index"] == 1
+    assert len(repair["teacher_routed_task_ids"]) == 2
+    assert len(repair["synthesized_task_ids"]) == 1
+    selected = json.loads(
+        (output / "rounds/round-0001/TASK-SELECTION.json").read_text()
+    )["selected_task_ids"]
+    assert set(repair["teacher_routed_task_ids"] + repair["synthesized_task_ids"]) == set(
+        selected
+    )
+    compiled_router = json.loads(
+        next(
+            (output / "rounds/round-0001/compiled-candidates").glob(
+                "*/COMPILED-ROUTER.json"
+            )
+        ).read_text()
+    )
+    assert set(route[0] for route in compiled_router["routes"]) == set(selected)
+    assert {route[1] for route in compiled_router["routes"]} == {"operator-localize"}
+
+    teacher_ledger = output / "TEACHER-CALL-LEDGER.jsonl"
+    cost_ledger = output / "teacher/COST-LEDGER.jsonl"
+    ledger_before = teacher_ledger.read_bytes()
+    cost_before = cost_ledger.read_bytes()
+    assert len(ledger_before.splitlines()) == 2
+    second_call = json.loads(ledger_before.splitlines()[1])
+    second_payload = second_call["payload"]
+    assert second_payload["candidate_revision_id"].endswith("-r0001")
+    normalized_response = output / second_payload["response_path"]
+    normalized = json.loads(normalized_response.read_text())
+    raw_response = normalized_response.with_name("TEACHER-RAW-RESPONSE.json")
+    assert second_payload["request_sha256"] == _sha(
+        (output / second_payload["request_path"]).read_text()
+    )
+    assert second_payload["response_sha256"] == hashlib.sha256(
+        normalized_response.read_bytes()
+    ).hexdigest()
+    assert normalized["raw_response_sha256"] == hashlib.sha256(
+        raw_response.read_bytes()
+    ).hexdigest()
+
+    assert main(argv) == 0
+    assert len(teacher_requests) == 2
+    assert teacher_ledger.read_bytes() == ledger_before
+    assert cost_ledger.read_bytes() == cost_before
+
+
+def test_invalid_router_reference_fails_closed_and_records_paid_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Router referencing another Operator still fails closed with the call indexed."""
+
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+
+    def foreign_operator_teacher(request: dict[str, object]) -> dict[str, object]:
+        raw = _teacher(teacher_requests, request)
+        choices = raw["choices"]
+        assert isinstance(choices, list)
+        message = choices[0]["message"]
+        assert isinstance(message, dict)
+        content = json.loads(str(message["content"]))
+        routes = content["router"]["routes"]
+        assert isinstance(routes, dict)
+        content["router"] = {
+            "routes": {
+                task_id: "operator-not-the-candidate"
+                for task_id in routes
+            }
+        }
+        message["content"] = json.dumps(content)
+        return raw
+
+    dependencies = EvolutionDependencies(
+        teacher_transport=foreign_operator_teacher,
         teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
         round_executor=ExecutableFixtureRoundExecutor(),
     )
@@ -723,40 +834,25 @@ def test_router_coverage_failure_records_paid_teacher_call_before_idempotent_res
     )
     assert block["phase"] == "candidate-compilation"
     assert len(teacher_requests) == 1
-    compiled_manifests = list(
-        (output / "rounds/round-0000/compiled-candidates").glob(
-            "*/COMPILED-REVISION.json"
-        )
-    )
-    assert len(compiled_manifests) == 1
-    teacher_ledger = output / "TEACHER-CALL-LEDGER.jsonl"
+    # A compile-time contract failure has no compiled revision to index, so the
+    # authoritative charge record is the durable cost ledger plus the frozen
+    # request/response triplets; the loop stays fail-closed and never re-dispatches.
     cost_ledger = output / "teacher/COST-LEDGER.jsonl"
-    ledger_before = teacher_ledger.read_bytes()
     cost_before = cost_ledger.read_bytes()
-    assert len(ledger_before.splitlines()) == 1
-    call = json.loads(ledger_before)
-    call_payload = call["payload"]
-    compiled = json.loads(compiled_manifests[0].read_text())
-    normalized_response = output / call_payload["response_path"]
-    normalized = json.loads(normalized_response.read_text())
-    raw_response = normalized_response.with_name("TEACHER-RAW-RESPONSE.json")
-    assert call_payload["request_sha256"] == _sha(
-        (output / call_payload["request_path"]).read_text()
+    assert len(cost_before.splitlines()) == 3
+    assert b'"event_id":"ledger-open"' in cost_before
+    assert b'"event_id":"teacher-result:' in cost_before
+    teacher_artifacts = list(
+        (output / "teacher").glob("*/TEACHER-REQUEST.json")
     )
-    assert call_payload["response_sha256"] == hashlib.sha256(
-        normalized_response.read_bytes()
-    ).hexdigest()
-    assert normalized["raw_response_sha256"] == hashlib.sha256(
-        raw_response.read_bytes()
-    ).hexdigest()
-    assert call_payload["candidate_revision_id"] == compiled["revision_id"]
-    assert call_payload["compiled_bundle_sha256"] == hashlib.sha256(
-        compiled_manifests[0].read_bytes()
-    ).hexdigest()
+    assert len(teacher_artifacts) == 1
+    assert list((output / "teacher").glob("*/TEACHER-RAW-RESPONSE.json"))
+    assert list((output / "teacher").glob("*/TEACHER-RESPONSE.json"))
+    assert not (output / "TEACHER-CALL-LEDGER.jsonl").exists()
+    assert not (output / "rounds/round-0000/compiled-candidates").exists()
 
     assert main(argv) == 0
     assert len(teacher_requests) == 1
-    assert teacher_ledger.read_bytes() == ledger_before
     assert cost_ledger.read_bytes() == cost_before
 
 

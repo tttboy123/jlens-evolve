@@ -10,7 +10,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from evolve.contracts import (
     Cohort,
@@ -49,6 +49,9 @@ class CompileSpec:
     operator_id: str = ""
     operator_instruction: str = ""
     routes: tuple[tuple[str, str], ...] = ()
+    required_route_task_ids: tuple[str, ...] = dataclasses.field(
+        default=(), metadata={"omit_if_empty": True}
+    )
 
     def __post_init__(self) -> None:
         for name in (
@@ -60,6 +63,12 @@ class CompileSpec:
             _require_identifier(name, value)
         if self.cohort is not Cohort.FEEDBACK:
             raise ContractViolation("candidate compilation is feedback-only")
+        required: set[str] = set()
+        for task_id in self.required_route_task_ids:
+            _require_identifier("required route task_id", task_id)
+            if task_id in required:
+                raise ContractViolation("required route task IDs must be unique")
+            required.add(task_id)
         if not self.operator_id and not self.operator_instruction and not self.routes:
             return
         _require_identifier(
@@ -104,6 +113,9 @@ class CandidateChangeSet:
     expected_external_effect: object | None = None
     expected_internal_effect: object | None = None
     falsification: object | None = None
+    synthesized_task_ids: tuple[str, ...] = dataclasses.field(
+        default=(), metadata={"omit_if_empty": True}
+    )
     source_request_sha256: str = ""
     source_response_sha256: str = ""
     lineage_sha256: str = ""
@@ -206,6 +218,7 @@ class CompiledRevision:
     manifest_path: Path
     bundle_sha256: str
     memory_policy: CompiledMemoryPolicy | None = None
+    synthesized_task_ids: tuple[str, ...] = ()
     lineage_sha256: str = ""
 
     @classmethod
@@ -331,6 +344,9 @@ class CompiledRevision:
                 "operator_instruction", ""
             ),
             routes=_routes(compile_spec_payload.get("routes", ())),
+            required_route_task_ids=tuple(
+                compile_spec_payload.get("required_route_task_ids", ())
+            ),
         )
         if manifest.get("compile_spec_sha256") != compile_spec.content_sha256:
             raise ContractViolation("compiled CompileSpec identity mismatch")
@@ -346,6 +362,9 @@ class CompiledRevision:
                     change_set_payload.get("operator_arguments", ())
                 ),
                 "preconditions": tuple(change_set_payload.get("preconditions", ())),
+                "synthesized_task_ids": tuple(
+                    change_set_payload.get("synthesized_task_ids", ())
+                ),
             }
         )
         _validate_change_set_source(change_set, teacher, compile_spec)
@@ -446,6 +465,7 @@ class CompiledRevision:
             manifest_path=manifest_path,
             bundle_sha256=_sha256(manifest_bytes),
             memory_policy=memory_policy,
+            synthesized_task_ids=change_set.synthesized_task_ids,
             lineage_sha256=lineage_sha256,
         )
 
@@ -499,6 +519,14 @@ class CandidateCompiler:
                 operator_instruction,
             ) = _operator(candidate["operator"])
             routes = _candidate_routes(candidate["router"], operator_id)
+            synthesized_task_ids = tuple(
+                task_id
+                for task_id in compile_spec.required_route_task_ids
+                if task_id not in {task_id for task_id, _ in routes}
+            )
+            routes = _repair_routes(
+                routes, compile_spec.required_route_task_ids, operator_id
+            )
             memory_value = candidate["memory_policy"]
             memory_policy_payload = (
                 None if memory_value is None else dict(memory_value)
@@ -539,6 +567,11 @@ class CandidateCompiler:
             expected_external_effect=expected_external_effect,
             expected_internal_effect=expected_internal_effect,
             falsification=falsification,
+            synthesized_task_ids=(
+                synthesized_task_ids
+                if parsed["candidate_schema_version"] == 2
+                else ()
+            ),
             source_request_sha256=request_sha256,
             source_response_sha256=response_sha256,
             lineage_sha256=lineage_sha256,
@@ -776,6 +809,28 @@ def _operator(value: object) -> tuple[str, str, tuple[str, ...], str]:
     return operator_id, kind, tuple(arguments), instruction
 
 
+def _repair_routes(
+    routes: tuple[tuple[str, str], ...],
+    required_task_ids: Sequence[str],
+    operator_id: str,
+) -> tuple[tuple[str, str], ...]:
+    """Deterministically extend a valid Router to cover required feedback tasks.
+
+    The Teacher's paid response is never mutated: the repair is a pure function
+    of the parsed routes, the authoritative selected-task list and the
+    Candidate's own Operator. It is bound to the revision through the
+    CompileSpec content hash and re-derived identically on load.
+    """
+
+    provided = {task_id for task_id, _ in routes}
+    missing = tuple(
+        task_id for task_id in required_task_ids if task_id not in provided
+    )
+    if not missing:
+        return routes
+    return routes + tuple((task_id, operator_id) for task_id in missing)
+
+
 def _candidate_routes(value: object, operator_id: str) -> tuple[tuple[str, str], ...]:
     if not isinstance(value, dict) or not value:
         raise ContractViolation("candidate Router is invalid")
@@ -896,13 +951,28 @@ def _validate_change_set_source(
             kind,
             arguments,
             instruction,
-            _candidate_routes(candidate["router"], operator_id),
+            _repair_routes(
+                _candidate_routes(candidate["router"], operator_id),
+                compile_spec.required_route_task_ids,
+                operator_id,
+            ),
             None if memory is None else dict(memory),
             tuple(candidate["preconditions"]),
             candidate["expected_external_effect"],
             candidate["expected_internal_effect"],
             candidate["falsification"],
         )
+    if teacher["candidate_schema_version"] == 2:
+        provided_routes = _candidate_routes(candidate["router"], operator_id)
+        expected_synthesized = tuple(
+            task_id
+            for task_id in compile_spec.required_route_task_ids
+            if task_id not in {task_id for task_id, _ in provided_routes}
+        )
+        if change_set.synthesized_task_ids != expected_synthesized:
+            raise ContractViolation(
+                "compiled Router repair projection mismatch"
+            )
     actual = (
         change_set.operator_id,
         change_set.operator_kind,

@@ -220,6 +220,7 @@ class CandidateProposer:
                 "feedback-only",
                 "candidate inactive",
                 "do not modify evaluator or model weights",
+                "router must cover every selected feedback task",
             ],
         }
         # A byte-level bound plus a fixed envelope allowance is deliberately

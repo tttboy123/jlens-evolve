@@ -186,6 +186,153 @@ def test_full_teacher_candidate_compiles_its_harness_and_binds_parent_lineage(
     assert CompiledRevision.load(compiled.root) == compiled
 
 
+def test_required_route_coverage_is_repair_and_survives_load_round_trip(
+    tmp_path: Path,
+) -> None:
+    """A schema-valid under-covered Router is deterministically repaired.
+
+    The repair is a pure function of the parsed response and the CompileSpec
+    required task list, so the sealed bundle reloads to an identical revision
+    without mutating the paid Teacher response.
+    """
+
+    result, _, _ = _propose(tmp_path, _candidate())
+    spec = CompileSpec(
+        candidate_id=result.candidate.candidate_id,
+        revision_id="candidate-r2",
+        parent_revision_id="candidate-r1",
+        cohort=Cohort.FEEDBACK,
+        required_route_task_ids=("feedback-a", "feedback-b", "feedback-c"),
+    )
+    compiled = CandidateCompiler().compile(
+        request_path=result.request_path,
+        response_path=result.response_path,
+        compile_spec=spec,
+        output_root=tmp_path / "compiled",
+    )
+    assert compiled.router.routes == (
+        ("feedback-a", "repair-source"),
+        ("feedback-b", "repair-source"),
+        ("feedback-c", "repair-source"),
+    )
+    assert dict(compiled.change_set.routes) == {
+        "feedback-a": "repair-source",
+        "feedback-b": "repair-source",
+        "feedback-c": "repair-source",
+    }
+    compile_spec_payload = json.loads(
+        (compiled.root / "COMPILE-SPEC.json").read_text(encoding="utf-8")
+    )
+    assert compile_spec_payload["required_route_task_ids"] == [
+        "feedback-a",
+        "feedback-b",
+        "feedback-c",
+    ]
+    manifest = json.loads(compiled.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["compile_spec_sha256"] == spec.content_sha256
+    assert CompiledRevision.load(compiled.root) == compiled
+    response_payload = json.loads(
+        (compiled.root / "TEACHER-RESPONSE.json").read_text(encoding="utf-8")
+    )
+    assert response_payload["candidate"]["router"]["routes"] == [
+        {"task_id": "feedback-a", "operator_id": "repair-source"}
+    ]
+    assert response_payload["receipt_sha256"]
+
+
+def test_compiled_repair_is_tamper_evident_in_router_and_spec(
+    tmp_path: Path,
+) -> None:
+    result, _, _ = _propose(tmp_path, _candidate())
+    spec = CompileSpec(
+        candidate_id=result.candidate.candidate_id,
+        revision_id="candidate-r2",
+        parent_revision_id="candidate-r1",
+        cohort=Cohort.FEEDBACK,
+        required_route_task_ids=("feedback-a", "feedback-b"),
+    )
+    compiled = CandidateCompiler().compile(
+        request_path=result.request_path,
+        response_path=result.response_path,
+        compile_spec=spec,
+        output_root=tmp_path / "compiled",
+    )
+    router_path = compiled.root / "COMPILED-ROUTER.json"
+    router = json.loads(router_path.read_text(encoding="utf-8"))
+    router["routes"] = [
+        {"task_id": "feedback-a", "operator_id": "repair-source"}
+    ]
+    router_path.write_text(canonical_json(router) + "\n", encoding="utf-8")
+    with pytest.raises(ContractViolation, match="hash mismatch"):
+        CompiledRevision.load(compiled.root)
+
+    spec_path = compiled.root / "COMPILE-SPEC.json"
+    spec_payload = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec_payload["required_route_task_ids"] = ["feedback-a", "feedback-b", "forged"]
+    spec_path.write_text(
+        canonical_json(spec_payload) + "\n", encoding="utf-8"
+    )
+    with pytest.raises(ContractViolation, match="hash mismatch: COMPILE-SPEC.json"):
+        CompiledRevision.load(compiled.root)
+
+
+def test_compile_spec_required_route_task_ids_are_validated(tmp_path: Path) -> None:
+    result, _, _ = _propose(tmp_path, _candidate())
+    with pytest.raises(ContractViolation, match="unique"):
+        CompileSpec(
+            candidate_id=result.candidate.candidate_id,
+            revision_id="candidate-r2",
+            parent_revision_id="candidate-r1",
+            cohort=Cohort.FEEDBACK,
+            required_route_task_ids=("feedback-a", "feedback-a"),
+        )
+    with pytest.raises(ContractViolation, match="not a safe immutable identifier"):
+        CompileSpec(
+            candidate_id=result.candidate.candidate_id,
+            revision_id="candidate-r2",
+            parent_revision_id="candidate-r1",
+            cohort=Cohort.FEEDBACK,
+            required_route_task_ids=("not valid! id",),
+        )
+
+
+def test_compile_spec_omits_empty_required_routes_keeping_legacy_hash(
+    tmp_path: Path,
+) -> None:
+    """Empty required routes stay out of the legacy content hash.
+
+    Previously sealed bundles compiled without the repair requirement must keep
+    their exact CompileSpec content hash.
+    """
+
+    result, _, _ = _propose(tmp_path, _candidate())
+    legacy = CompileSpec(
+        candidate_id=result.candidate.candidate_id,
+        revision_id="candidate-r2",
+        parent_revision_id="candidate-r1",
+        cohort=Cohort.FEEDBACK,
+    )
+    explicit_empty = CompileSpec(
+        candidate_id=result.candidate.candidate_id,
+        revision_id="candidate-r2",
+        parent_revision_id="candidate-r1",
+        cohort=Cohort.FEEDBACK,
+        required_route_task_ids=(),
+    )
+    assert legacy.content_sha256 == explicit_empty.content_sha256
+    compiled = CandidateCompiler().compile(
+        request_path=result.request_path,
+        response_path=result.response_path,
+        compile_spec=legacy,
+        output_root=tmp_path / "compiled-legacy",
+    )
+    spec_payload = json.loads(
+        (compiled.root / "COMPILE-SPEC.json").read_text(encoding="utf-8")
+    )
+    assert "required_route_task_ids" not in spec_payload
+    assert CompiledRevision.load(compiled.root) == compiled
+
+
 def test_compiled_lineage_and_memory_policy_are_tamper_evident(tmp_path: Path) -> None:
     result, _, _ = _propose(
         tmp_path,
