@@ -322,9 +322,7 @@ def test_teacher_proposer_freezes_and_charges_invalid_provider_response(
             max_output_tokens=1000,
         )
 
-    raw_response = (
-        root / "invalid-candidate" / "TEACHER-RAW-RESPONSE.json"
-    )
+    raw_response = root / "invalid-candidate" / "TEACHER-RAW-RESPONSE.json"
     assert raw_response.is_file()
     assert not (root / "invalid-candidate" / "TEACHER-RESPONSE.json").exists()
     assert proposer.cost_ledger.snapshot().spent_cost_cny == 0.006
@@ -346,3 +344,45 @@ def test_teacher_proposer_freezes_and_charges_invalid_provider_response(
         )
     assert calls == 1
     assert restarted.cost_ledger.snapshot().spent_cost_cny == 0.006
+
+
+def test_candidate_routes_normalize_teacher_derived_keys():
+
+    from evolve.proposals.candidate_chain import _candidate_routes
+
+    required = ("django__django-11149", "laravel__framework-52684")
+    router = {
+        "routes": {
+            "feedback-django__django-11149@e245046bb6e8": "op-v1",
+            "laravel__framework-52684": "op-v1",
+        }
+    }
+    routes = _candidate_routes(router, "op-v1", required_task_ids=required)
+    assert set(task_id for task_id, _ in routes) == set(required)
+
+
+def test_candidate_routes_fail_closed_on_ambiguous_key():
+    import pytest
+
+    from evolve.contracts import ContractViolation
+    from evolve.proposals.candidate_chain import _candidate_routes
+
+    # Key contains two required ids -> ambiguous -> fail closed.
+    required = ("django__django-11149", "django__django-11551")
+    router = {
+        "routes": {"feedback-django__django-11149_x_django__django-11551@abc": "op-v1"}
+    }
+    with pytest.raises(ContractViolation):
+        _candidate_routes(router, "op-v1", required_task_ids=required)
+
+
+def test_candidate_routes_strict_without_required_ids():
+    import pytest
+
+    from evolve.contracts import ContractViolation
+    from evolve.proposals.candidate_chain import _candidate_routes
+
+    # Without required ids the strict identifier rule applies (legacy path).
+    router = {"routes": {"feedback-x@y": "op-v1"}}
+    with pytest.raises(ContractViolation):
+        _candidate_routes(router, "op-v1")

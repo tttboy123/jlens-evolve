@@ -232,10 +232,10 @@ class CompiledRevision:
             raise ContractViolation(
                 "compiled revision manifest is unreadable"
             ) from error
-        if (
-            not isinstance(manifest, dict)
-            or manifest.get("schema_version") not in {1, 2}
-        ):
+        if not isinstance(manifest, dict) or manifest.get("schema_version") not in {
+            1,
+            2,
+        }:
             raise ContractViolation("compiled revision manifest is invalid")
         manifest_schema = manifest["schema_version"]
         artifacts = manifest.get("artifacts")
@@ -340,9 +340,7 @@ class CompiledRevision:
             parent_revision_id=compile_spec_payload["parent_revision_id"],
             cohort=Cohort(compile_spec_payload["cohort"]),
             operator_id=compile_spec_payload.get("operator_id", ""),
-            operator_instruction=compile_spec_payload.get(
-                "operator_instruction", ""
-            ),
+            operator_instruction=compile_spec_payload.get("operator_instruction", ""),
             routes=_routes(compile_spec_payload.get("routes", ())),
             required_route_task_ids=tuple(
                 compile_spec_payload.get("required_route_task_ids", ())
@@ -433,13 +431,10 @@ class CompiledRevision:
             ):
                 raise ContractViolation("compiled candidate lineage hash mismatch")
             if (
-                change_set.source_candidate_sha256
-                != lineage["source_candidate_sha256"]
-                or change_set.compile_spec_sha256
-                != lineage["compile_spec_sha256"]
+                change_set.source_candidate_sha256 != lineage["source_candidate_sha256"]
+                or change_set.compile_spec_sha256 != lineage["compile_spec_sha256"]
                 or change_set.parent_revision_id != lineage["parent_revision_id"]
-                or manifest.get("parent_revision_id")
-                != lineage["parent_revision_id"]
+                or manifest.get("parent_revision_id") != lineage["parent_revision_id"]
                 or change_set.source_request_sha256 != lineage["request_sha256"]
                 or change_set.source_response_sha256 != lineage["response_sha256"]
                 or change_set.lineage_sha256 != lineage_sha256
@@ -518,7 +513,11 @@ class CandidateCompiler:
                 operator_arguments,
                 operator_instruction,
             ) = _operator(candidate["operator"])
-            routes = _candidate_routes(candidate["router"], operator_id)
+            routes = _candidate_routes(
+                candidate["router"],
+                operator_id,
+                required_task_ids=compile_spec.required_route_task_ids,
+            )
             synthesized_task_ids = tuple(
                 task_id
                 for task_id in compile_spec.required_route_task_ids
@@ -528,9 +527,7 @@ class CandidateCompiler:
                 routes, compile_spec.required_route_task_ids, operator_id
             )
             memory_value = candidate["memory_policy"]
-            memory_policy_payload = (
-                None if memory_value is None else dict(memory_value)
-            )
+            memory_policy_payload = None if memory_value is None else dict(memory_value)
             preconditions = tuple(candidate["preconditions"])
             expected_external_effect = candidate["expected_external_effect"]
             expected_internal_effect = candidate["expected_internal_effect"]
@@ -568,9 +565,7 @@ class CandidateCompiler:
             expected_internal_effect=expected_internal_effect,
             falsification=falsification,
             synthesized_task_ids=(
-                synthesized_task_ids
-                if parsed["candidate_schema_version"] == 2
-                else ()
+                synthesized_task_ids if parsed["candidate_schema_version"] == 2 else ()
             ),
             source_request_sha256=request_sha256,
             source_response_sha256=response_sha256,
@@ -799,8 +794,7 @@ def _operator(value: object) -> tuple[str, str, tuple[str, ...], str]:
     kind = _require_text("candidate Operator kind", value.get("kind", "zero-arg"))
     arguments = value.get("arguments", [])
     if not isinstance(arguments, list) or any(
-        not isinstance(argument, str) or not argument.strip()
-        for argument in arguments
+        not isinstance(argument, str) or not argument.strip() for argument in arguments
     ):
         raise ContractViolation("candidate Operator arguments are invalid")
     instruction = _require_text(
@@ -823,15 +817,35 @@ def _repair_routes(
     """
 
     provided = {task_id for task_id, _ in routes}
-    missing = tuple(
-        task_id for task_id in required_task_ids if task_id not in provided
-    )
+    missing = tuple(task_id for task_id in required_task_ids if task_id not in provided)
     if not missing:
         return routes
     return routes + tuple((task_id, operator_id) for task_id in missing)
 
 
-def _candidate_routes(value: object, operator_id: str) -> tuple[tuple[str, str], ...]:
+def _normalize_route_key(key: str, required_task_ids: Sequence[str]) -> str:
+    """Map a Teacher Router key onto the authoritative selected instance_id.
+
+    The Teacher contract demands exact instance_id keys, but weak models
+    occasionally emit derived forms such as ``feedback-<id>@<short-commit>``
+    or ``round1-<id>``.  When the key contains exactly one required task id as
+    a substring, it is deterministically normalized here (a pure function,
+    re-derived identically on load).  Unrecognizable or ambiguous keys stay
+    fail-closed so a malformed Router is never silently accepted.
+    """
+    if key in required_task_ids:
+        return key
+    candidates = [task_id for task_id in required_task_ids if task_id in key]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise ContractViolation(
+        "candidate Router task_id is not a safe immutable identifier"
+    )
+
+
+def _candidate_routes(
+    value: object, operator_id: str, required_task_ids: Sequence[str] = ()
+) -> tuple[tuple[str, str], ...]:
     if not isinstance(value, dict) or not value:
         raise ContractViolation("candidate Router is invalid")
     raw_routes = value["routes"] if set(value) == {"routes"} else value
@@ -851,7 +865,10 @@ def _candidate_routes(value: object, operator_id: str) -> tuple[tuple[str, str],
         else:
             raise ContractViolation("candidate Router route is invalid")
         task_id = _require_text("candidate Router task_id", task_id)
-        _require_identifier("candidate Router task_id", task_id)
+        if required_task_ids:
+            task_id = _normalize_route_key(task_id, required_task_ids)
+        else:
+            _require_identifier("candidate Router task_id", task_id)
         if routed_operator != operator_id:
             raise ContractViolation("candidate Router references another Operator")
         routes.append((task_id, operator_id))
@@ -896,9 +913,7 @@ def _validate_compiled_projection(
     if (
         router.routes != change_set.routes
         or router.parent_revision_id not in {"", change_set.parent_revision_id}
-        or any(
-            operator_id != operator.operator_id for _, operator_id in router.routes
-        )
+        or any(operator_id != operator.operator_id for _, operator_id in router.routes)
     ):
         raise ContractViolation("compiled Router is not derived from the change set")
     if (memory_policy is None) != (change_set.memory_policy is None):
@@ -970,9 +985,7 @@ def _validate_change_set_source(
             if task_id not in {task_id for task_id, _ in provided_routes}
         )
         if change_set.synthesized_task_ids != expected_synthesized:
-            raise ContractViolation(
-                "compiled Router repair projection mismatch"
-            )
+            raise ContractViolation("compiled Router repair projection mismatch")
     actual = (
         change_set.operator_id,
         change_set.operator_kind,

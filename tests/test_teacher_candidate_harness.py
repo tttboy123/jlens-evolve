@@ -36,9 +36,7 @@ def _candidate(*, memory_policy: object = None) -> dict[str, object]:
             "instruction": "Repair only the demonstrated failure mode.",
         },
         "router": {
-            "routes": [
-                {"task_id": "feedback-a", "operator_id": "repair-source"}
-            ]
+            "routes": [{"task_id": "feedback-a", "operator_id": "repair-source"}]
         },
         "memory_policy": memory_policy,
         "preconditions": ["feedback cohort", "clean evaluator boundary"],
@@ -126,9 +124,7 @@ def test_legacy_v1_receipt_replays_without_dispatch(tmp_path: Path) -> None:
         "output_tokens": result.usage.output_tokens,
         "estimated_cost_cny": result.usage.estimated_cost_cny,
     }
-    result.response_path.write_text(
-        canonical_json(receipt) + "\n", encoding="utf-8"
-    )
+    result.response_path.write_text(canonical_json(receipt) + "\n", encoding="utf-8")
     replay = CandidateProposer(
         root=tmp_path / "teacher",
         provider="deepseek",
@@ -180,9 +176,12 @@ def test_full_teacher_candidate_compiles_its_harness_and_binds_parent_lineage(
     assert manifest["lineage"]["source_candidate_sha256"] == (
         compiled.change_set.source_candidate_sha256
     )
-    assert manifest["lineage_sha256"] == hashlib.sha256(
-        canonical_json(manifest["lineage"]).encode("utf-8")
-    ).hexdigest()
+    assert (
+        manifest["lineage_sha256"]
+        == hashlib.sha256(
+            canonical_json(manifest["lineage"]).encode("utf-8")
+        ).hexdigest()
+    )
     assert CompiledRevision.load(compiled.root) == compiled
 
 
@@ -259,9 +258,7 @@ def test_compiled_repair_is_tamper_evident_in_router_and_spec(
     )
     router_path = compiled.root / "COMPILED-ROUTER.json"
     router = json.loads(router_path.read_text(encoding="utf-8"))
-    router["routes"] = [
-        {"task_id": "feedback-a", "operator_id": "repair-source"}
-    ]
+    router["routes"] = [{"task_id": "feedback-a", "operator_id": "repair-source"}]
     router_path.write_text(canonical_json(router) + "\n", encoding="utf-8")
     with pytest.raises(ContractViolation, match="hash mismatch"):
         CompiledRevision.load(compiled.root)
@@ -269,9 +266,7 @@ def test_compiled_repair_is_tamper_evident_in_router_and_spec(
     spec_path = compiled.root / "COMPILE-SPEC.json"
     spec_payload = json.loads(spec_path.read_text(encoding="utf-8"))
     spec_payload["required_route_task_ids"] = ["feedback-a", "feedback-b", "forged"]
-    spec_path.write_text(
-        canonical_json(spec_payload) + "\n", encoding="utf-8"
-    )
+    spec_path.write_text(canonical_json(spec_payload) + "\n", encoding="utf-8")
     with pytest.raises(ContractViolation, match="hash mismatch: COMPILE-SPEC.json"):
         CompiledRevision.load(compiled.root)
 
@@ -373,9 +368,7 @@ def test_parent_lineage_tamper_is_rejected_even_when_manifest_is_valid_json(
     )
     manifest = json.loads(compiled.manifest_path.read_text(encoding="utf-8"))
     manifest["parent_revision_id"] = "forged-parent"
-    compiled.manifest_path.write_text(
-        canonical_json(manifest) + "\n", encoding="utf-8"
-    )
+    compiled.manifest_path.write_text(canonical_json(manifest) + "\n", encoding="utf-8")
 
     with pytest.raises(ContractViolation, match="lineage"):
         CompiledRevision.load(compiled.root)
@@ -395,7 +388,9 @@ class _Response:
         return json.dumps(self.payload).encode("utf-8")
 
 
-def test_teacher_transports_share_protocol_and_deepseek_contract(tmp_path: Path) -> None:
+def test_teacher_transports_share_protocol_and_deepseek_contract(
+    tmp_path: Path,
+) -> None:
     captured: list[tuple[Any, float]] = []
     raw = _raw_response(_candidate())
 
@@ -421,9 +416,7 @@ def test_teacher_transports_share_protocol_and_deepseek_contract(tmp_path: Path)
     assert deepseek({"request_id": "deepseek", "max_output_tokens": 100}) == raw
     deepseek_body = json.loads(captured[-1][0].data)
     assert deepseek_body["thinking"] == {"type": "disabled"}
-    system_contract = json.loads(
-        deepseek_body["messages"][0]["content"]
-    )
+    system_contract = json.loads(deepseek_body["messages"][0]["content"])
     assert "candidate_schema" not in system_contract
     assert set(system_contract["output_contract"]["top_level_keys"]) == set(
         _candidate()
@@ -441,7 +434,12 @@ def test_teacher_transports_share_protocol_and_deepseek_contract(tmp_path: Path)
         "kind": "zero-arg",
     }
     assert system_contract["field_contracts"]["router"] == {
-        "routes": {"<selected task instance_id>": "<operator id>"}
+        "routes": {"<EXACT selected task instance_id, verbatim>": "<operator id>"},
+        "route_key_rule": (
+            "each route key must be EXACTLY one selected task's instance_id "
+            "from selected_tasks; verbatim, with no prefix (no 'feedback-', "
+            "no 'round1-') and no '@<commit>' suffix"
+        ),
     }
     assert system_contract["field_contracts"]["preconditions"] == [
         "non-empty execution condition"

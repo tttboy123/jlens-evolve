@@ -49,7 +49,12 @@ _FIELD_CONTRACTS: dict[str, object] = {
         "instruction": "non-empty executable instruction",
     },
     "router": {
-        "routes": {"<selected task instance_id>": "<operator id>"}
+        "routes": {"<EXACT selected task instance_id, verbatim>": "<operator id>"},
+        "route_key_rule": (
+            "each route key must be EXACTLY one selected task's instance_id "
+            "from selected_tasks; verbatim, with no prefix (no 'feedback-', "
+            "no 'round1-') and no '@<commit>' suffix"
+        ),
     },
     "memory_policy": "null or a non-empty JSON object",
     "preconditions": ["non-empty execution condition"],
@@ -103,9 +108,19 @@ class OpenAICompatibleTeacherTransport:
             raise ContractViolation("Teacher API key or environment name is required")
         if timeout_seconds <= 0:
             raise ContractViolation("Teacher timeout must be positive")
-        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
-            raise ContractViolation("Teacher max_retries must be a non-negative integer")
-        if isinstance(retry_base_delay, bool) or not isinstance(retry_base_delay, (int, float)) or retry_base_delay < 0:
+        if (
+            isinstance(max_retries, bool)
+            or not isinstance(max_retries, int)
+            or max_retries < 0
+        ):
+            raise ContractViolation(
+                "Teacher max_retries must be a non-negative integer"
+            )
+        if (
+            isinstance(retry_base_delay, bool)
+            or not isinstance(retry_base_delay, (int, float))
+            or retry_base_delay < 0
+        ):
             raise ContractViolation("Teacher retry_base_delay must be non-negative")
         self.endpoint = selected_endpoint
         self.model = model
@@ -153,9 +168,7 @@ class OpenAICompatibleTeacherTransport:
                     raise ContractViolation(
                         "Teacher transport request failed"
                     ) from error
-                delay = self.retry_base_delay * (2**attempt) + random.uniform(
-                    0.0, 0.5
-                )
+                delay = self.retry_base_delay * (2**attempt) + random.uniform(0.0, 0.5)
                 time.sleep(delay)
         else:  # pragma: no cover - defensive; the loop raises on final failure
             assert last_error is not None
@@ -195,6 +208,8 @@ class OpenAICompatibleTeacherTransport:
                     "include every top_level_keys field exactly once",
                     "candidate remains inactive",
                     "do not change weights, evaluator, cohort, or activation state",
+                    "every router route key must equal one selected task's "
+                    "instance_id exactly (no feedback- prefix, no @commit suffix)",
                 ],
             }
         )
