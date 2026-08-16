@@ -215,6 +215,7 @@ class CandidateProposer:
             "provider": self.provider,
             "model": self.model,
             "max_output_tokens": max_output_tokens,
+            "temperature": failure_package.get("temperature", 0.0),
             "failure_package": failure_package,
             "constraints": [
                 "feedback-only",

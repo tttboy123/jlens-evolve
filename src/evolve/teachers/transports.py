@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
@@ -57,6 +59,23 @@ _FIELD_CONTRACTS: dict[str, object] = {
 }
 
 
+_RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_retryable(error: Exception) -> bool:
+    """Transient network/gateway failures are retried; contract bugs are not."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in _RETRYABLE_HTTP_CODES
+    if isinstance(error, urllib.error.URLError):
+        return True
+    if isinstance(error, OSError):
+        return True
+    if isinstance(error, json.JSONDecodeError):
+        # A gateway can answer 200 with an HTML error page; retry once is cheap.
+        return True
+    return False
+
+
 class OpenAICompatibleTeacherTransport:
     """Send one deterministic JSON-mode request to a compatible endpoint."""
 
@@ -69,6 +88,8 @@ class OpenAICompatibleTeacherTransport:
         api_key: str | None = None,
         api_key_env: str | None = None,
         timeout_seconds: float = 60,
+        max_retries: int = 3,
+        retry_base_delay: float = 1.0,
         opener: Callable[..., Any] = urllib.request.urlopen,
     ) -> None:
         if endpoint is not None and base_url is not None and endpoint != base_url:
@@ -82,11 +103,17 @@ class OpenAICompatibleTeacherTransport:
             raise ContractViolation("Teacher API key or environment name is required")
         if timeout_seconds <= 0:
             raise ContractViolation("Teacher timeout must be positive")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+            raise ContractViolation("Teacher max_retries must be a non-negative integer")
+        if isinstance(retry_base_delay, bool) or not isinstance(retry_base_delay, (int, float)) or retry_base_delay < 0:
+            raise ContractViolation("Teacher retry_base_delay must be non-negative")
         self.endpoint = selected_endpoint
         self.model = model
         self._api_key = api_key
         self._api_key_env = api_key_env
         self.timeout_seconds = float(timeout_seconds)
+        self.max_retries = int(max_retries)
+        self.retry_base_delay = float(retry_base_delay)
         self._opener = opener
 
     def __call__(self, request: dict[str, object]) -> dict[str, object]:
@@ -107,16 +134,32 @@ class OpenAICompatibleTeacherTransport:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with self._opener(http_request, timeout=self.timeout_seconds) as response:
-                raw = json.loads(response.read())
-        except (
-            OSError,
-            UnicodeError,
-            json.JSONDecodeError,
-            urllib.error.URLError,
-        ) as error:
-            raise ContractViolation("Teacher transport request failed") from error
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                with self._opener(
+                    http_request, timeout=self.timeout_seconds
+                ) as response:
+                    raw = json.loads(response.read())
+                break
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                urllib.error.URLError,
+            ) as error:
+                last_error = error
+                if not _is_retryable(error) or attempt >= self.max_retries:
+                    raise ContractViolation(
+                        "Teacher transport request failed"
+                    ) from error
+                delay = self.retry_base_delay * (2**attempt) + random.uniform(
+                    0.0, 0.5
+                )
+                time.sleep(delay)
+        else:  # pragma: no cover - defensive; the loop raises on final failure
+            assert last_error is not None
+            raise ContractViolation("Teacher transport request failed") from last_error
         if not isinstance(raw, dict):
             raise ContractViolation("Teacher transport response must be an object")
         return raw
@@ -125,6 +168,13 @@ class OpenAICompatibleTeacherTransport:
         max_tokens = request.get("max_output_tokens", 4096)
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
             raise ContractViolation("Teacher max_output_tokens must be an integer")
+        temperature = request.get("temperature", 0.0)
+        if (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not (0.0 <= float(temperature) <= 2.0)
+        ):
+            raise ContractViolation("Teacher temperature must be a number in [0, 2]")
         system = canonical_json(
             {
                 "purpose": "evolve an external Skill/Harness for a frozen model",
@@ -150,7 +200,7 @@ class OpenAICompatibleTeacherTransport:
         )
         return {
             "model": self.model,
-            "temperature": 0,
+            "temperature": float(temperature),
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system},
@@ -241,6 +291,8 @@ def build_teacher_transport(
     api_key: str | None = None,
     api_key_env: str | None = None,
     timeout_seconds: float = 60,
+    max_retries: int = 3,
+    retry_base_delay: float = 1.0,
     opener: Callable[..., Any] = urllib.request.urlopen,
 ) -> TeacherTransport:
     """Construct the provider adapter used by the autonomous runner."""
@@ -263,5 +315,7 @@ def build_teacher_transport(
         api_key=api_key,
         api_key_env=api_key_env,
         timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+        retry_base_delay=retry_base_delay,
         opener=opener,
     )

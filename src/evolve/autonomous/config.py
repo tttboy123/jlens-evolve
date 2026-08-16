@@ -42,6 +42,35 @@ def _text(name: str, value: object) -> str:
     return value
 
 
+def _positive_float(name: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise AutonomousEvolutionError(f"{name} must be a positive number")
+    return float(value)
+
+
+def _temperature_schedule(name: str, value: object) -> tuple[float, ...]:
+    if not isinstance(value, list) or not value:
+        raise AutonomousEvolutionError(f"{name} must be a non-empty list")
+    out: list[float] = []
+    for item in value:
+        if (
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not (0.0 <= float(item) <= 2.0)
+        ):
+            raise AutonomousEvolutionError(
+                f"{name} entries must be numbers in [0, 2]"
+            )
+        out.append(float(item))
+    return tuple(out)
+
+
+def _temperature(name: str, value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (0.0 <= float(value) <= 2.0):
+        raise AutonomousEvolutionError(f"{name} must be a number in [0, 2]")
+    return float(value)
+
+
 def _positive_int(name: str, value: object, *, allow_zero: bool = False) -> int:
     minimum = 0 if allow_zero else 1
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -95,6 +124,11 @@ class TeacherConfig:
     api_key_env: str
     budget_cny: float
     max_output_tokens: int
+    timeout_seconds: float = 60.0
+    max_retries: int = 3
+    retry_base_delay: float = 1.0
+    temperature: float = 0.0
+    temperature_schedule: tuple[float, ...] = (0.0,)
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,16 +199,23 @@ class AutonomousEvolutionConfig:
                 "cohort",
             },
         )
-        teacher_row = _object(
+        teacher_row = _object_with_optional(
             "teacher",
             root["teacher"],
-            {
+            required={
                 "provider",
                 "model",
                 "endpoint",
                 "api_key_env",
                 "budget_cny",
                 "max_output_tokens",
+            },
+            optional={
+                "timeout_seconds",
+                "max_retries",
+                "retry_base_delay",
+                "temperature",
+                "temperature_schedule",
             },
         )
         execution_row = _object(
@@ -291,6 +332,25 @@ class AutonomousEvolutionConfig:
                 budget_cny=float(budget),
                 max_output_tokens=_positive_int(
                     "teacher.max_output_tokens", teacher_row["max_output_tokens"]
+                ),
+                timeout_seconds=_positive_float(
+                    "teacher.timeout_seconds",
+                    teacher_row.get("timeout_seconds", 60.0),
+                ),
+                max_retries=_positive_int(
+                    "teacher.max_retries",
+                    teacher_row.get("max_retries", 3),
+                ),
+                retry_base_delay=_positive_float(
+                    "teacher.retry_base_delay",
+                    teacher_row.get("retry_base_delay", 1.0),
+                ),
+                temperature=_temperature(
+                    "teacher.temperature", teacher_row.get("temperature", 0.0)
+                ),
+                temperature_schedule=_temperature_schedule(
+                    "teacher.temperature_schedule",
+                    teacher_row.get("temperature_schedule", [0.0]),
                 ),
             ),
             execution=ExecutionConfig(

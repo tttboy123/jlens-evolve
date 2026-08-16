@@ -130,6 +130,9 @@ def build_default_dependencies(
             model=config.teacher.model,
             endpoint=config.teacher.endpoint,
             api_key_env=config.teacher.api_key_env,
+            timeout_seconds=config.teacher.timeout_seconds,
+            max_retries=config.teacher.max_retries,
+            retry_base_delay=config.teacher.retry_base_delay,
         ),
         teacher_pricing=pricing,
         round_executor=FreshFeedbackRoundExecutor(),
@@ -139,6 +142,13 @@ def build_default_dependencies(
             else "real-live-teacher"
         ),
     )
+
+
+def _round_temperature(schedule: Sequence[float], round_index: int) -> float:
+    """Pick the beam temperature for a round, rotating through the schedule."""
+    if not schedule:
+        return 0.0
+    return float(schedule[round_index % len(schedule)])
 
 
 def _git(root: Path, *args: str) -> str:
@@ -370,11 +380,15 @@ class AutonomousEvolutionRunner:
                     if row.get("classification") == "regression"
                 ],
                 "rejected_candidate_ids": rejected_candidate_ids,
+                "temperature": _round_temperature(
+                    self.config.teacher.temperature_schedule, current_round
+                ),
                 "constraints": {
                     "feedback_only": True,
                     "no_weight_training": True,
                     "candidate_inactive": True,
                     "do_not_modify_evaluator": True,
+                    "candidate_must_be_structurally_new": True,
                 },
             }
             freeze_json(round_root / "FAILURE-PACKAGE.json", failure_package)
@@ -1056,6 +1070,7 @@ class AutonomousEvolutionRunner:
         error: Exception,
     ) -> dict[str, Any]:
         blocked = replace(state, status=GoalRunStatus.BLOCKED_INTEGRITY)
+        cause = error.__cause__
         freeze_json(
             round_root / "INTEGRITY-BLOCK.json",
             {
@@ -1063,6 +1078,9 @@ class AutonomousEvolutionRunner:
                 "phase": phase,
                 "error_type": type(error).__name__,
                 "error": str(error),
+                "cause_type": type(cause).__name__ if cause is not None else None,
+                "cause": str(cause) if cause is not None else None,
+                "cause_code": getattr(cause, "code", None) if cause is not None else None,
                 "best_candidate_revision_id": state.best_candidate_revision_id,
                 "best_bundle_sha256": state.best_bundle_sha256,
                 "best_advanced": False,
