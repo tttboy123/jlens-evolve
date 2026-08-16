@@ -41,6 +41,7 @@ class GoalState:
     best_bundle_sha256: str | None
     same_failure_signature_sha256: str | None = None
     same_failure_signature_rounds: int = 0
+    student_unresolvable_task_ids: tuple[str, ...] = ()
 
 
 class GoalStateStore:
@@ -84,6 +85,9 @@ class GoalStateStore:
                 ),
                 same_failure_signature_rounds=int(
                     row.get("same_failure_signature_rounds", 0)
+                ),
+                student_unresolvable_task_ids=tuple(
+                    row.get("student_unresolvable_task_ids", [])
                 ),
             )
         except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError) as error:

@@ -54,6 +54,7 @@ class TaskSelectionContext:
     goal_gap: int
     task_selection_counts: Mapping[str, int]
     repeat_hard_cap: int
+    excluded_task_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         frozen_claims: list[Mapping[str, Any]] = []
@@ -107,6 +108,11 @@ class TaskSelectionContext:
             "task_selection_counts",
             _validated_counts("task selection counts", self.task_selection_counts),
         )
+        object.__setattr__(
+            self,
+            "excluded_task_ids",
+            _validated_task_ids("excluded task ids", self.excluded_task_ids),
+        )
         if (
             isinstance(self.goal_gap, bool)
             or not isinstance(self.goal_gap, int)
@@ -121,7 +127,7 @@ class TaskSelectionContext:
             raise AutonomousEvolutionError("repeat hard cap must be a positive integer")
 
     def identity_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "historical_claims": [
                 _thaw_json(claim) for claim in self.historical_claims
             ],
@@ -134,6 +140,9 @@ class TaskSelectionContext:
             "task_selection_counts": dict(self.task_selection_counts),
             "repeat_hard_cap": self.repeat_hard_cap,
         }
+        if self.excluded_task_ids:
+            payload["excluded_task_ids"] = list(self.excluded_task_ids)
+        return payload
 
     @property
     def content_sha256(self) -> str:
@@ -236,9 +245,10 @@ class FeedbackTaskSelector:
             str(claim.get("task_id")): str(claim.get("classification"))
             for claim in claims
         }
+        excluded = set(context.excluded_task_ids if context is not None else ())
         if context is None:
             ranked = sorted(
-                self.tasks,
+                [task for task in self.tasks if task["instance_id"] not in excluded],
                 key=lambda task: (
                     0
                     if priorities.get(str(task["instance_id"]))
@@ -257,6 +267,7 @@ class FeedbackTaskSelector:
             }
             reasons: tuple[str, ...] = (
                 "feedback-only",
+                *((("excluded-task-filter",) if excluded else ())),
                 "project-diversity",
                 "deterministic-round-rotation",
             )
@@ -268,6 +279,7 @@ class FeedbackTaskSelector:
                     for task in self.tasks
                     if context.task_selection_counts.get(str(task["instance_id"]), 0)
                     < context.repeat_hard_cap
+                    and str(task["instance_id"]) not in excluded
                 ),
                 key=lambda task: (
                     0
@@ -293,6 +305,11 @@ class FeedbackTaskSelector:
             }
             reasons = (
                 "feedback-only",
+                *(
+                    (f"excluded-task-count={len(excluded)}",)
+                    if excluded
+                    else ()
+                ),
                 f"goal-gap={context.goal_gap}",
                 f"current-best={context.current_best_revision_id or 'none'}",
                 "unsupported-current-best-first",

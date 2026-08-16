@@ -193,8 +193,6 @@ class FreshFeedbackRoundExecutor:
             ),
             SkillPairedStrategy(),
         )
-        if str(result.status) != "completed":
-            raise AutonomousEvolutionError("baseline campaign did not complete")
         models = tuple(
             receipt for receipt in result.receipts if receipt.kind == "model"
         )
@@ -224,14 +222,85 @@ class FreshFeedbackRoundExecutor:
             for row in outcomes
             if not row["resolved"] or row["evaluator_error"]
         )
+        replayed = bool(result.executions) and all(
+            execution.replayed for execution in result.executions
+        )
+        if str(result.status) != "completed":
+            return self._partial_baseline(
+                request=request,
+                environment=environment,
+                models=models,
+                native=native,
+                outcomes=outcomes,
+                failures=failures,
+                replayed=replayed,
+            )
         return BaselineProbeResult(
             task_ids=tuple(task.task_id for task in environment.tasks),
             model_receipt_ids=tuple(receipt.receipt_id for receipt in models),
             native_receipt_ids=tuple(receipt.receipt_id for receipt in native),
             native_outcomes=outcomes,
             failure_signatures=failures,
-            replayed=bool(result.executions)
-            and all(execution.replayed for execution in result.executions),
+            replayed=replayed,
+        )
+
+    def _partial_baseline(
+        self,
+        *,
+        request: RoundExecutionRequest,
+        environment: Any,
+        models: Any,
+        native: Any,
+        outcomes: Any,
+        failures: Any,
+        replayed: bool,
+    ) -> BaselineProbeResult:
+        """Return a partial baseline instead of crashing the campaign.
+
+        A per-task student failure (empty/invalid patch) means no model/native
+        receipt for that task.  The round then records a neutral round and
+        accumulates the failed task ids for selection exclusion, rather than
+        killing the whole process.
+        """
+        all_task_ids = tuple(task.task_id for task in environment.tasks)
+        pool_id_to_instance = {
+            str(row["task_id"]): str(row["instance_id"])
+            for row in request.selection.tasks
+            if str(row.get("task_id")) and str(row.get("instance_id"))
+        }
+        cells_root = request.output_root / "baseline-probe/qwen-cells"
+        failed: dict[str, str] = {}
+        seen_instance_ids: set[str] = set()
+        if cells_root.is_dir():
+            for cell_path in sorted(cells_root.glob("*/RESULT.json")):
+                try:
+                    row = json.loads(cell_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                req = row.get("request") or {}
+                cell_task = req.get("legacy_task_id")
+                if not isinstance(cell_task, str) or not cell_task:
+                    continue
+                # qwen cells key by the pool task_id (round1-<instance>);
+                # normalize onto the selected instance_id.
+                instance_id = pool_id_to_instance.get(cell_task, cell_task)
+                seen_instance_ids.add(instance_id)
+                patch = row.get("patch") or ""
+                reason = row.get("failure_reason")
+                if not patch or reason:
+                    failed[instance_id] = reason or "empty-patch"
+        for task_id in all_task_ids:
+            if task_id not in seen_instance_ids and task_id not in failed:
+                failed[task_id] = "no-cell"
+        return BaselineProbeResult(
+            task_ids=all_task_ids,
+            model_receipt_ids=tuple(receipt.receipt_id for receipt in models),
+            native_receipt_ids=tuple(receipt.receipt_id for receipt in native),
+            native_outcomes=outcomes,
+            failure_signatures=failures,
+            replayed=replayed,
+            failed_task_ids=tuple(dict.fromkeys(failed)),
+            failure_reasons=dict(failed),
         )
 
     def prescreen(self, request: RoundExecutionRequest) -> PrescreenResult:

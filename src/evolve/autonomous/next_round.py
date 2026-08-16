@@ -53,9 +53,20 @@ def rebuild_campaign_feedback(
 ) -> dict[str, Any]:
     """Reconstruct pre-schema feedback without mutating its sealed round."""
 
-    prescreen = _load_json_object(round_root / "PRESCREEN-RESULT.json")
     campaign_result = _load_json_object(round_root / "CAMPAIGN-RESULT.json")
     campaign_status = campaign_result.get("campaign_status")
+    if campaign_status == "baseline_failed":
+        # A baseline-failed round has no prescreen, teacher, or paired campaign;
+        # the feedback is projected verbatim from the frozen CAMPAIGN-RESULT.
+        return {
+            "schema_version": 1,
+            "campaign_id": campaign_result.get("campaign_id"),
+            "campaign_status": "baseline_failed",
+            "task_pairs": [],
+            "failed_task_ids": list(campaign_result.get("failed_task_ids", [])),
+            "failure_reasons": dict(campaign_result.get("failure_reasons", {})),
+        }
+    prescreen = _load_json_object(round_root / "PRESCREEN-RESULT.json")
     if campaign_status == "screened_out":
         claims: tuple[VerifiedCampaignClaim, ...] = ()
     elif campaign_status == "infra_failure":

@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 from urllib.parse import urlparse
@@ -55,6 +55,8 @@ class BaselineProbeResult:
     native_outcomes: tuple[Mapping[str, Any], ...]
     failure_signatures: tuple[Mapping[str, Any], ...]
     replayed: bool
+    failed_task_ids: tuple[str, ...] = ()
+    failure_reasons: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,6 +313,12 @@ class AutonomousEvolutionRunner:
                     tasks_per_campaign=self.config.execution.tasks_per_campaign,
                     pool_size=len(self.selector.tasks),
                 ),
+                excluded_task_ids=tuple(
+                    dict.fromkeys(
+                        (*state.student_unresolvable_task_ids,
+                         *self.config.goal.excluded_task_ids)
+                    )
+                ),
             )
             selection = self.selector.select(
                 round_index=current_round,
@@ -358,6 +366,154 @@ class AutonomousEvolutionRunner:
                 _validate_baseline(baseline, selection)
                 freeze_json(baseline_path, _baseline_payload(baseline))
             _validate_baseline(baseline, selection)
+            if baseline.failed_task_ids:
+                task_id_to_instance = {
+                    str(task.get("task_id") or task["instance_id"]): str(
+                        task["instance_id"]
+                    )
+                    for task in selection.tasks
+                }
+                failed_instance_ids = tuple(
+                    dict.fromkeys(
+                        task_id_to_instance.get(tid, tid)
+                        for tid in baseline.failed_task_ids
+                    )
+                )
+                reasons_by_instance = {
+                    task_id_to_instance.get(tid, tid): reason
+                    for tid, reason in baseline.failure_reasons.items()
+                }
+                student_unresolvable = set(state.student_unresolvable_task_ids)
+                has_infra = False
+                for reason in baseline.failure_reasons.values():
+                    if reason not in _STUDENT_UNRESOLVABLE_REASONS:
+                        has_infra = True
+                for tid, reason in baseline.failure_reasons.items():
+                    if reason in _STUDENT_UNRESOLVABLE_REASONS:
+                        student_unresolvable.add(task_id_to_instance.get(tid, tid))
+                no_progress = state.no_progress_rounds + 1
+                consecutive_infra = (
+                    state.consecutive_infra_failures + 1 if has_infra else 0
+                )
+                campaign_feedback = {
+                    "schema_version": 1,
+                    "campaign_id": (
+                        f"{state.goal_id}-r{current_round:04d}-baseline-failed"
+                    ),
+                    "campaign_status": "baseline_failed",
+                    "task_pairs": [],
+                    "failed_task_ids": list(failed_instance_ids),
+                    "failure_reasons": reasons_by_instance,
+                }
+                failure_signature_sha256 = hashlib.sha256(
+                    canonical_json(
+                        {
+                            "baseline_failed": sorted(failed_instance_ids),
+                            "reasons": {
+                                key: reasons_by_instance[key]
+                                for key in sorted(reasons_by_instance)
+                            },
+                        }
+                    ).encode("utf-8")
+                ).hexdigest()
+                same_failure_rounds = (
+                    state.same_failure_signature_rounds + 1
+                    if state.same_failure_signature_sha256
+                    == failure_signature_sha256
+                    else 1
+                )
+                round_payload = {
+                    "schema_version": 1,
+                    "round_index": current_round,
+                    "selection_id": selection.selection_id,
+                    "baseline_replayed": baseline.replayed,
+                    "candidate_id": "",
+                    "candidate_revision_id": "",
+                    "parent_revision_id": baseline_revision_id,
+                    "compiled_bundle_sha256": "",
+                    "prescreen": {},
+                    "claims": [],
+                    "campaign_feedback": campaign_feedback,
+                    "fitness": 0,
+                    "round_outcome": "neutral",
+                    "accepted_as_best": False,
+                    "best_candidate_revision_id": state.best_candidate_revision_id,
+                    "best_bundle_sha256": state.best_bundle_sha256,
+                    "campaign_status": "baseline_failed",
+                    "failure_signature_sha256": failure_signature_sha256,
+                    "baseline_failed_task_ids": list(failed_instance_ids),
+                    "baseline_failure_reasons": reasons_by_instance,
+                }
+                freeze_json(
+                    round_root / "BASELINE-RESULT.json",
+                    _baseline_payload(baseline),
+                )
+                freeze_json(
+                    round_root / "CAMPAIGN-RESULT.json",
+                    {
+                        "schema_version": 1,
+                        "campaign_id": campaign_feedback["campaign_id"],
+                        "campaign_status": "baseline_failed",
+                        "claims": [],
+                        "capability_active": False,
+                        "holdout_opened": False,
+                        "burned_holdout_opened": False,
+                        "failed_task_ids": list(failed_instance_ids),
+                        "failure_reasons": reasons_by_instance,
+                    },
+                )
+                freeze_json(
+                    round_root / "AUTONOMOUS-ROUND-RESULT.json", round_payload
+                )
+                seal_manifest(round_root)
+                self.round_index.append(
+                    event_id=f"round-{current_round:04d}", payload=round_payload
+                )
+                prior_claims = ()
+                prior_campaign_feedback = campaign_feedback
+                for task_id in selection.selected_task_ids:
+                    selection_counts[task_id] = (
+                        selection_counts.get(task_id, 0) + 1
+                    )
+                state = GoalState(
+                    schema_version=1,
+                    goal_id=state.goal_id,
+                    status=GoalRunStatus.ACTIVE,
+                    next_round_index=current_round + 1,
+                    rounds_completed=current_round + 1,
+                    no_progress_rounds=no_progress,
+                    consecutive_infra_failures=consecutive_infra,
+                    native_gain_task_ids=tuple(sorted(gained_tasks)),
+                    best_candidate_revision_id=state.best_candidate_revision_id,
+                    best_bundle_sha256=state.best_bundle_sha256,
+                    same_failure_signature_sha256=failure_signature_sha256,
+                    same_failure_signature_rounds=same_failure_rounds,
+                    student_unresolvable_task_ids=tuple(
+                        sorted(student_unresolvable)
+                    ),
+                )
+                if no_progress >= self.config.goal.no_progress_patience:
+                    state = replace(state, status=GoalRunStatus.NO_PROGRESS)
+                elif (
+                    consecutive_infra
+                    >= self.config.goal.max_consecutive_infra_failures
+                ):
+                    state = replace(
+                        state,
+                        status=GoalRunStatus.MAX_CONSECUTIVE_INFRA_FAILURES,
+                    )
+                elif (
+                    same_failure_rounds
+                    >= self.config.goal.max_same_failure_signature
+                ):
+                    state = replace(
+                        state,
+                        status=GoalRunStatus.MAX_SAME_FAILURE_SIGNATURE,
+                    )
+                self.state_store.write(state)
+                if state.status is not GoalRunStatus.ACTIVE:
+                    return self._write_result(state, proposer=proposer)
+                continue
             baseline_payload = _baseline_payload(baseline)
             failure_package = {
                 "schema_version": 1,
@@ -708,6 +864,7 @@ class AutonomousEvolutionRunner:
                 best_bundle_sha256=best_bundle,
                 same_failure_signature_sha256=failure_signature_sha256,
                 same_failure_signature_rounds=same_failure_rounds,
+                student_unresolvable_task_ids=state.student_unresolvable_task_ids,
             )
             if len(gained_tasks) >= self.config.goal.target_native_gains:
                 state = replace(state, status=GoalRunStatus.GOAL_REACHED)
@@ -858,6 +1015,7 @@ class AutonomousEvolutionRunner:
         best_round_payload: Mapping[str, Any] | None = None
         task_selection_counts: dict[str, int] = {}
         failure_signature_counts: dict[str, int] = {}
+        student_unresolvable: list[str] = []
         for sequence, row in enumerate(rows):
             payload = row["payload"]
             if payload.get("round_index") != sequence:
@@ -912,6 +1070,9 @@ class AutonomousEvolutionRunner:
             _accumulate_failure_counts(
                 failure_signature_counts, prior_campaign_feedback
             )
+            for task_id in payload.get("baseline_failed_task_ids", []):
+                if task_id not in student_unresolvable:
+                    student_unresolvable.append(str(task_id))
             if payload.get("accepted_as_best"):
                 best_fitness = int(payload["fitness"])
                 best_round = (
@@ -922,7 +1083,8 @@ class AutonomousEvolutionRunner:
                 best_candidate = str(payload["candidate_id"])
                 best_round_payload = dict(payload)
             else:
-                rejected.append(str(payload["candidate_id"]))
+                if payload.get("candidate_id"):
+                    rejected.append(str(payload["candidate_id"]))
         if rows:
             recovered = self._recover_state_from_rounds(state, rows)
             if len(rows) == state.rounds_completed + 1:
@@ -1017,6 +1179,13 @@ class AutonomousEvolutionRunner:
             else:
                 break
         last = rows[-1]["payload"]
+        recovered_unresolvable: list[str] = []
+        for row in rows:
+            recovered_unresolvable.extend(
+                str(task_id)
+                for task_id in row["payload"].get("baseline_failed_task_ids", [])
+                if str(task_id) not in recovered_unresolvable
+            )
         recovered = GoalState(
             schema_version=state.schema_version,
             goal_id=state.goal_id,
@@ -1030,6 +1199,7 @@ class AutonomousEvolutionRunner:
             best_bundle_sha256=last.get("best_bundle_sha256"),
             same_failure_signature_sha256=tail_failure_signature,
             same_failure_signature_rounds=tail_same_failure,
+            student_unresolvable_task_ids=tuple(sorted(recovered_unresolvable)),
         )
         if len(gained) >= self.config.goal.target_native_gains:
             return replace(recovered, status=GoalRunStatus.GOAL_REACHED)
@@ -1338,6 +1508,8 @@ def _baseline_payload(result: BaselineProbeResult) -> dict[str, Any]:
         "native_outcomes": [dict(row) for row in result.native_outcomes],
         "failure_signatures": [dict(row) for row in result.failure_signatures],
         "replayed": result.replayed,
+        "failed_task_ids": list(result.failed_task_ids),
+        "failure_reasons": dict(result.failure_reasons),
     }
 
 
@@ -1365,6 +1537,8 @@ def _load_baseline_result(path: Path) -> BaselineProbeResult:
             native_outcomes=tuple(payload["native_outcomes"]),
             failure_signatures=tuple(payload["failure_signatures"]),
             replayed=bool(payload["replayed"]),
+            failed_task_ids=tuple(payload.get("failed_task_ids", ())),
+            failure_reasons=dict(payload.get("failure_reasons", {})),
         )
     except (KeyError, TypeError) as error:
         raise AutonomousEvolutionError("frozen baseline result is invalid") from error
@@ -1421,9 +1595,33 @@ def _load_prescreen_result(path: Path) -> PrescreenResult:
         raise AutonomousEvolutionError("frozen prescreen result is invalid") from error
 
 
+_STUDENT_UNRESOLVABLE_REASONS = frozenset(
+    {
+        "operator-class-mismatch",
+        "expression-used-for-statement",
+        "unresolved",
+        "plan-too-large",
+        "semantic-oracle-rejected",
+        "structural-rejected",
+        "json-malformed",
+        "selector-no-match",
+        "unrelated-symbol",
+        "apply-fail",
+        "no-op",
+        "unbound-name",
+        "empty-patch",
+        "no-cell",
+    }
+)
+
+
 def _validate_baseline(result: BaselineProbeResult, selection: TaskSelection) -> None:
     if set(result.task_ids) != set(selection.selected_task_ids):
         raise AutonomousEvolutionError("baseline result task selection mismatch")
+    if result.failed_task_ids:
+        # Partial baseline: one or more selected tasks could not produce a
+        # student patch.  The round records a neutral round and continues.
+        return
     if len(result.model_receipt_ids) != len(selection.selected_task_ids):
         raise AutonomousEvolutionError("baseline did not produce real model receipts")
     if len(result.native_receipt_ids) != len(selection.selected_task_ids):

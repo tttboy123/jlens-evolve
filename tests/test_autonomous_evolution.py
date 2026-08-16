@@ -1696,3 +1696,105 @@ def test_cli_help_exposes_only_the_product_entry(
     assert "--config" in help_text
     assert "--output" in help_text
     assert "continuous-feedback-evolution" not in help_text
+
+
+class BaselineFailFixtureRoundExecutor(ExecutableFixtureRoundExecutor):
+    """Baseline fails once on the first selected task (student-unresolvable)."""
+
+    def __init__(self) -> None:
+        self._failed = False
+
+    def baseline(self, request: RoundExecutionRequest) -> BaselineProbeResult:
+        task_ids = tuple(task.task_id for task in _tasks(request))
+        if self._failed:
+            return super().baseline(request)
+        self._failed = True
+        first = task_ids[0]
+        ok_ids = task_ids[1:]
+        return BaselineProbeResult(
+            task_ids=task_ids,
+            model_receipt_ids=tuple(
+                f"baseline-model-{item}" for item in ok_ids
+            ),
+            native_receipt_ids=tuple(
+                f"baseline-native-{item}" for item in ok_ids
+            ),
+            native_outcomes=tuple(
+                {"task_id": item, "resolved": False} for item in ok_ids
+            ),
+            failure_signatures=tuple(
+                {"task_id": item, "signature": "native_unresolved"}
+                for item in ok_ids
+            ),
+            replayed=False,
+            failed_task_ids=(first,),
+            failure_reasons={first: "operator-class-mismatch"},
+        )
+
+
+def test_baseline_failure_records_neutral_round_and_excludes_task(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worktree = _clean_worktree(tmp_path)
+    teacher_requests: list[dict[str, object]] = []
+
+    def teacher(request: dict[str, object]) -> dict[str, object]:
+        return _teacher(teacher_requests, request)
+
+    dependencies = EvolutionDependencies(
+        teacher_transport=teacher,
+        teacher_pricing=PricingCnyPerMillionTokens(input=2.0, output=8.0),
+        round_executor=BaselineFailFixtureRoundExecutor(),
+    )
+    monkeypatch.setattr(
+        "evolve.autonomous_evolution.build_default_dependencies",
+        lambda _config: dependencies,
+    )
+    config_path = _config(tmp_path)
+    config_payload = json.loads(config_path.read_text())
+    config_payload["goal"]["max_rounds"] = 3
+    config_payload["goal"]["no_progress_patience"] = 3
+    config_payload["goal"]["target_native_gains"] = 3
+    config_path.write_text(json.dumps(config_payload), encoding="utf-8")
+    output = tmp_path / "output"
+
+    assert (
+        main(
+            [
+                "autonomous-evolve",
+                "--config",
+                str(config_path),
+                "--output",
+                str(output),
+                "--worktree-root",
+                str(worktree),
+            ]
+        )
+        == 0
+    )
+
+    r0 = json.loads(
+        (output / "rounds/round-0000/AUTONOMOUS-ROUND-RESULT.json").read_text()
+    )
+    assert r0["campaign_status"] == "baseline_failed"
+    assert r0["round_outcome"] == "neutral"
+    assert r0["baseline_failure_reasons"] == {
+        r0["baseline_failed_task_ids"][0]: "operator-class-mismatch"
+    }
+    failed_task = r0["baseline_failed_task_ids"][0]
+    # Round-1 selection excludes the student-unresolvable task.
+    r1_selection = json.loads(
+        (output / "rounds/round-0001/TASK-SELECTION.json").read_text()
+    )
+    assert failed_task not in r1_selection["selected_task_ids"]
+    # State records the exclusion.
+    state = json.loads((output / "EVOLUTION-STATE.json").read_text())
+    assert failed_task in state["student_unresolvable_task_ids"]
+    # The failed task is never selected again after round-0000.
+    for round_dir in sorted((output / "rounds").glob("round-*")):
+        if round_dir.name == "round-0000":
+            continue
+        selection = json.loads(
+            (round_dir / "TASK-SELECTION.json").read_text()
+        )
+        assert failed_task not in selection["selected_task_ids"]

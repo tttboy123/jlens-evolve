@@ -486,3 +486,44 @@ def test_autonomous_indexes_replay_idempotently_and_detect_chain_tamper(
     index.path.write_text(json.dumps(row) + "\n", encoding="utf-8")
     with pytest.raises(AutonomousEvolutionError, match="chain mismatch"):
         index.rows()
+
+
+def test_feedback_selector_excludes_known_failed_tasks(tmp_path: Path) -> None:
+    selector = FeedbackTaskSelector(_task_pool(tmp_path))
+    context = TaskSelectionContext(
+        historical_claims=(),
+        current_best_revision_id=None,
+        current_best_supported_task_ids=(),
+        failure_signature_counts={},
+        goal_gap=3,
+        task_selection_counts={},
+        repeat_hard_cap=3,
+        excluded_task_ids=("django__task-2",),
+    )
+    selected = selector.select(round_index=0, count=3, context=context)
+    assert "django__task-2" not in selected.selected_task_ids
+    assert len(selected.selected_task_ids) == 3
+    assert "excluded-task-count=1" in selected.selection_reason
+
+
+def test_feedback_selector_exclusion_empty_is_byte_identical(tmp_path: Path) -> None:
+    selector = FeedbackTaskSelector(_task_pool(tmp_path))
+    base = dict(
+        historical_claims=(),
+        current_best_revision_id=None,
+        current_best_supported_task_ids=(),
+        failure_signature_counts={},
+        goal_gap=3,
+        task_selection_counts={},
+        repeat_hard_cap=3,
+    )
+    a = selector.select(
+        round_index=0, count=3, context=TaskSelectionContext(**base)
+    )
+    b = selector.select(
+        round_index=0,
+        count=3,
+        context=TaskSelectionContext(**base, excluded_task_ids=()),
+    )
+    assert a.selection_id == b.selection_id
+    assert a.selection_reason == b.selection_reason

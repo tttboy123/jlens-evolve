@@ -42,6 +42,14 @@ def _text(name: str, value: object) -> str:
     return value
 
 
+def _task_id_list(name: str, value: object) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise AutonomousEvolutionError(f"{name} must be a list of non-empty task ids")
+    return tuple(dict.fromkeys(value))
+
+
 def _positive_float(name: str, value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
         raise AutonomousEvolutionError(f"{name} must be a positive number")
@@ -98,6 +106,7 @@ class GoalConfig:
     max_consecutive_infra_failures: int
     max_same_failure_signature: int
     disk_limit_bytes: int
+    excluded_task_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,6 +305,10 @@ class AutonomousEvolutionConfig:
                 max_same_failure_signature=_positive_int(
                     "goal.max_same_failure_signature",
                     goal_row.get("max_same_failure_signature", 5),
+                ),
+                excluded_task_ids=_task_id_list(
+                    "goal.excluded_task_ids",
+                    goal_row.get("excluded_task_ids", []),
                 ),
                 disk_limit_bytes=_positive_int(
                     "goal.disk_limit_bytes",
