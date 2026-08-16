@@ -434,13 +434,12 @@ def test_teacher_transports_share_protocol_and_deepseek_contract(
         "kind": "zero-arg",
     }
     assert system_contract["field_contracts"]["router"] == {
-        "routes": {"<EXACT selected task instance_id, verbatim>": "<operator id>"},
-        "route_key_rule": (
-            "each route key must be EXACTLY one selected task's instance_id "
-            "from selected_tasks; verbatim, with no prefix (no 'feedback-', "
-            "no 'round1-') and no '@<commit>' suffix"
-        ),
+        "routes": {"<EXACT selected task instance_id, verbatim>": "<operator id>"}
     }
+    assert any(
+        "instance_id exactly" in constraint or "no @commit suffix" in constraint
+        for constraint in system_contract["constraints"]
+    )
     assert system_contract["field_contracts"]["preconditions"] == [
         "non-empty execution condition"
     ]

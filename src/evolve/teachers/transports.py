@@ -49,12 +49,7 @@ _FIELD_CONTRACTS: dict[str, object] = {
         "instruction": "non-empty executable instruction",
     },
     "router": {
-        "routes": {"<EXACT selected task instance_id, verbatim>": "<operator id>"},
-        "route_key_rule": (
-            "each route key must be EXACTLY one selected task's instance_id "
-            "from selected_tasks; verbatim, with no prefix (no 'feedback-', "
-            "no 'round1-') and no '@<commit>' suffix"
-        ),
+        "routes": {"<EXACT selected task instance_id, verbatim>": "<operator id>"}
     },
     "memory_policy": "null or a non-empty JSON object",
     "preconditions": ["non-empty execution condition"],
