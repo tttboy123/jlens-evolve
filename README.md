@@ -117,3 +117,7 @@ fixture profile and one allowlisted local live profile. The bounded
 inactive validated Capability and a new live tournament without minting Claims
 or activating assets. See `docs/MIGRATION-v3.md` and
 `docs/TRUST-BOUNDARIES.md` for authority and threat boundaries.
+
+## License
+
+[MIT](LICENSE)

@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "jlens-evolve"
 version = "3.0.0.dev0"
 description = "Evidence-centric evolution platform for frozen Agent programs"
+license = "MIT"
+readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = []
 
