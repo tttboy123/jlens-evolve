@@ -21,6 +21,7 @@ _GIT_REVISION = re.compile(r"^[0-9a-f]{40}$")
 _SUPPORTED_BENCHMARKS = {
     "swe-bench-verified",
     "swe-bench-multilingual",
+    "multi-swe-bench-flash",
 }
 
 

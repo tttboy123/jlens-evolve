@@ -71,6 +71,7 @@ _MODEL_IDENTITY_FILES = (
 _DATASETS = {
     "swe-bench-verified": "harness-inputs/swe-bench-verified.jsonl",
     "swe-bench-multilingual": "harness-inputs/swe-bench-multilingual.jsonl",
+    "multi-swe-bench-flash": "inputs/multi-swe-bench-flash/multi_swe_bench_flash.jsonl",
 }
 _EXPERIMENT_MECHANISM_ID = "compiled-teacher-candidate-v1"
 
