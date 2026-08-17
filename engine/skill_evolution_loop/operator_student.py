@@ -19,6 +19,7 @@ from .mlx_student import (
     _teaching_reminder,
 )
 from .operator_rewrite import OperatorPlan, _find_definition, materialize_operator_plan
+from .capabilities import StudentCapabilityProfile, profile_for
 from .student_adapter import (
     StudentAdapter,
     StudentAttempt,
@@ -802,13 +803,18 @@ class OperatorPlanAdapter(StudentAdapter):
             return self._failure(
                 task, revision, "", "eval-infra", "generator returned non-text"
             )
-        if len(raw) > _MAX_OPERATOR_PLAN_CHARS:
+        plan_limit = getattr(
+            getattr(self.generator, "profile", None),
+            "max_plan_chars",
+            _MAX_OPERATOR_PLAN_CHARS,
+        )
+        if len(raw) > plan_limit:
             return self._failure(
                 task,
                 revision,
                 raw,
                 "plan-too-large",
-                f"operator plan exceeds {_MAX_OPERATOR_PLAN_CHARS} characters",
+                f"operator plan exceeds {plan_limit} characters",
             )
         unresolved = parse_unresolved_abstention(raw)
         if unresolved is not None:
@@ -1047,10 +1053,14 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
         max_tokens: int = 1536,
         max_context_chars: int = 24_000,
         max_context_targets: int = 32,
-        max_plan_repairs: int = 1,
+        max_plan_repairs: int | None = None,
         use_clause_critic: bool = True,
+        profile: StudentCapabilityProfile | None = None,
         **fields: Any,
     ) -> None:
+        self.profile = profile or profile_for(str(fields.get("model_path", "")))
+        if max_plan_repairs is None:
+            max_plan_repairs = self.profile.max_plan_repairs
         if type(max_plan_repairs) is not int or max_plan_repairs < 0:
             raise ValueError("operator max_plan_repairs must be non-negative")
         if type(use_clause_critic) is not bool:
@@ -1117,7 +1127,7 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
             "method and replace_method_body only for an explicit body rewrite. "
             "If no selector matches exactly once, return an "
             "unresolved JSON plan rather than guessing. Keep the entire response "
-            f"under {_MAX_OPERATOR_PLAN_CHARS} characters.\n\n"
+            f"under {self.profile.max_plan_chars} characters.\n\n"
             f"{catalog}\n\n"
             f"Protocol: {revision.protocol}\n"
             f"Teaching Skill:\n{teaching}"
@@ -1466,7 +1476,7 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
             "teaching_projection": (
                 "task-lexical-top5-max1400-mandatory-2-4-5-shared-suffix-v3"
             ),
-            "max_plan_chars": _MAX_OPERATOR_PLAN_CHARS,
+            "max_plan_chars": self.profile.max_plan_chars,
         }
 
 

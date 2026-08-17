@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .capabilities import StudentCapabilityProfile, profile_for
 from .contracts import ContractError, LoopRevision, canonical_json
 from .experiment import ExperimentCondition
 from .mlx_student import (
@@ -293,15 +294,17 @@ class ExactSpanCandidate:
     occurrence: int
     score: int
 
-    def to_prompt_dict(self) -> dict[str, Any]:
-        return {
+    def to_prompt_dict(self, *, include_roles: bool = True) -> dict[str, Any]:
+        prompt = {
             "candidate_id": self.candidate_id,
             "file": self.file,
             "before": self.before,
             "line": self.line,
             "occurrence": self.occurrence,
-            "roles": list(_candidate_control_flow_roles(self.before)),
         }
+        if include_roles:
+            prompt["roles"] = list(_candidate_control_flow_roles(self.before))
+        return prompt
 
 
 @dataclass(frozen=True)
@@ -2313,13 +2316,18 @@ class SpanPlanAdapter(StudentAdapter):
             return self._failure(
                 task, revision, "", "eval-infra", "generator returned non-text"
             )
-        if len(raw) > _MAX_SPAN_BUNDLE_CHARS:
+        bundle_limit = getattr(
+            getattr(self.generator, "profile", None),
+            "bundle_output_chars",
+            _MAX_SPAN_BUNDLE_CHARS,
+        )
+        if len(raw) > bundle_limit:
             return self._failure(
                 task,
                 revision,
                 raw,
                 "plan-too-large",
-                f"span bundle exceeds {_MAX_SPAN_BUNDLE_CHARS} characters",
+                f"span bundle exceeds {bundle_limit} characters",
             )
         if revision.source_round >= 39:
             typed_candidates = _frozen_causal_candidates(task, revision)
@@ -2501,9 +2509,13 @@ class MlxSpanPlanGenerator(MlxStructuredGenerator):
         max_context_chars: int = 24_000,
         max_context_targets: int = 32,
         max_exact_span_candidates: int = _MAX_EXACT_SPAN_CANDIDATES,
-        max_plan_repairs: int = 1,
+        max_plan_repairs: int | None = None,
+        profile: StudentCapabilityProfile | None = None,
         **fields: Any,
     ) -> None:
+        self.profile = profile or profile_for(str(fields.get("model_path", "")))
+        if max_plan_repairs is None:
+            max_plan_repairs = self.profile.max_span_repairs
         if type(max_plan_repairs) is not int or max_plan_repairs < 0:
             raise ValueError("span max_plan_repairs must be non-negative")
         if type(max_context_targets) is not int or not 1 <= max_context_targets <= 32:
@@ -2635,12 +2647,12 @@ class MlxSpanPlanGenerator(MlxStructuredGenerator):
             "one invariant. Keep each span at most 80 lines. "
             "Never repeat a before span, and ensure "
             "after differs from before by non-whitespace content. Keep each "
-            "before+after operation under 600 characters. If no exact unique "
+            f"before+after operation under {self.profile.recipe_output_chars} characters. If no exact unique "
             "span supports a bounded repair, use the single failure schema "
             '{"schema_version":1,"status":"unresolved","diagnostic":"..."} '
             "rather than fabricating "
             "source. Keep the entire response under "
-            f"{_MAX_SPAN_BUNDLE_CHARS} characters. Do not return a diff, full file, "
+            f"{self.profile.bundle_output_chars} characters. Do not return a diff, full file, "
             "markdown, or prose. Trace the reported symptom backward through local "
             "assignments and supplied callee contracts before editing a downstream "
             "branch result. Supporting evidence is READ-ONLY and is never an "
@@ -2654,7 +2666,12 @@ class MlxSpanPlanGenerator(MlxStructuredGenerator):
             f"### {relative}\n{excerpt}" for relative, excerpt in contexts
         )
         rendered_candidates = canonical_json(
-            [candidate.to_prompt_dict() for candidate in candidates]
+            [
+                candidate.to_prompt_dict(
+                    include_roles=self.profile.show_roles_in_prompt
+                )
+                for candidate in candidates
+            ]
         )
         rendered_support = canonical_json(
             [context.to_prompt_dict() for context in supporting_contexts]
@@ -2830,7 +2847,7 @@ class MlxSpanPlanGenerator(MlxStructuredGenerator):
             "state_role_policy": "issue-triggered-parser-state-protected-v1",
             "framework_owned_fields": ["diagnosis", "intent", "localization"],
             "teaching_projection": "mandatory-first3-max900-shared-suffix-v3",
-            "max_bundle_chars": _MAX_SPAN_BUNDLE_CHARS,
+            "max_bundle_chars": self.profile.bundle_output_chars,
         }
 
 

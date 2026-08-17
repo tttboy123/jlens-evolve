@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from skill_evolution_loop import LoopRevision, StudentTask
+from skill_evolution_loop.capabilities import StudentCapabilityProfile
 from skill_evolution_loop.span_student import (
     MlxSpanPlanGenerator,
     SpanPlanAdapter,
@@ -2493,3 +2494,128 @@ def test_definition_line_role_is_lexical_boundary() -> None:
         "dataflow-boundary",
     )
     assert _candidate_control_flow_roles("foo(1);") == ("call-site-boundary",)
+
+
+# --------------------------------------------------------------------------
+# B: model capability profile wiring (B1 role hygiene + B2 length contracts)
+# --------------------------------------------------------------------------
+
+
+def test_exact_span_candidate_hides_roles_when_profile_disables() -> None:
+    checkout = _checkout(Path(__import__("tempfile").mkdtemp()) / "repo")
+    (candidate,) = _frozen_causal_candidates(_task(checkout), _revision(False))[:1]
+    assert "roles" in candidate.to_prompt_dict(include_roles=True)
+    assert "roles" not in candidate.to_prompt_dict(include_roles=False)
+
+
+def test_span_generator_hides_roles_for_weak_4b_profile(tmp_path: Path) -> None:
+    checkout = _checkout(tmp_path / "repo")
+    rendered: list[list[dict[str, str]]] = []
+
+    class Tokenizer:
+        @staticmethod
+        def apply_chat_template(
+            messages, *, add_generation_prompt, enable_thinking, tokenize=False
+        ):
+            assert tokenize is False
+            rendered.append(messages)
+            return "\n".join(row["content"] for row in messages)
+
+    generator = MlxSpanPlanGenerator(
+        model_path="models/Qwen3.5-4B-mlx-4bit",
+        max_tokens=512,
+        loader=lambda _path: (object(), Tokenizer()),
+        text_generator=lambda *_args, **_kwargs: _raw_plan(),
+    )
+    assert generator.profile.model_id == "qwen3.5-4b-mlx-4bit"
+    assert generator.profile.show_roles_in_prompt is False
+    generator(_task(checkout), _revision(False))
+    user_content = rendered[0][1]["content"]
+    assert "ONLY EDITABLE exact-span candidates" in user_content
+    assert '"roles"' not in user_content
+
+
+def test_span_generator_shows_roles_when_profile_enables(tmp_path: Path) -> None:
+    checkout = _checkout(tmp_path / "repo")
+    rendered: list[list[dict[str, str]]] = []
+
+    class Tokenizer:
+        @staticmethod
+        def apply_chat_template(
+            messages, *, add_generation_prompt, enable_thinking, tokenize=False
+        ):
+            assert tokenize is False
+            rendered.append(messages)
+            return "\n".join(row["content"] for row in messages)
+
+    generator = MlxSpanPlanGenerator(
+        model_path="models/Qwen3.5-4B-mlx-4bit",
+        max_tokens=512,
+        loader=lambda _path: (object(), Tokenizer()),
+        text_generator=lambda *_args, **_kwargs: _raw_plan(),
+        profile=StudentCapabilityProfile(
+            model_id="custom-strong",
+            show_roles_in_prompt=True,
+            max_span_repairs=0,
+        ),
+    )
+    generator(_task(checkout), _revision(False))
+    user_content = rendered[0][1]["content"]
+    assert '"roles"' in user_content
+    assert '"lexical-boundary"' in user_content
+
+
+def test_span_generator_bundle_chars_follow_profile(tmp_path: Path) -> None:
+    checkout = _checkout(tmp_path / "repo")
+    rendered: list[list[dict[str, str]]] = []
+
+    class Tokenizer:
+        @staticmethod
+        def apply_chat_template(
+            messages, *, add_generation_prompt, enable_thinking, tokenize=False
+        ):
+            assert tokenize is False
+            rendered.append(messages)
+            return "\n".join(row["content"] for row in messages)
+
+    generator = MlxSpanPlanGenerator(
+        model_path="models/Qwen2.5-Coder-7B-Instruct-4bit",
+        max_tokens=512,
+        loader=lambda _path: (object(), Tokenizer()),
+        text_generator=lambda *_args, **_kwargs: _raw_plan(),
+    )
+    # 7B profile: recipe per-op 800, bundle 1400.
+    system_content = rendered[0][0]["content"] if rendered else ""
+    generator(_task(checkout), _revision(True, source_round=70))
+    system_content = rendered[0][0]["content"]
+    assert "under 800 characters" in system_content
+    assert "under 1400 characters" in system_content
+    assert generator.generation_config()["max_bundle_chars"] == 1400
+
+
+def test_span_adapter_plan_too_large_uses_profile_bundle_chars(
+    tmp_path: Path,
+) -> None:
+    checkout = _checkout(tmp_path / "repo")
+
+    class Tokenizer:
+        @staticmethod
+        def apply_chat_template(
+            messages, *, add_generation_prompt, enable_thinking, tokenize=False
+        ):
+            return "\n".join(row["content"] for row in messages)
+
+    generator = MlxSpanPlanGenerator(
+        model_path="fixture-model",
+        max_tokens=512,
+        loader=lambda _path: (object(), Tokenizer()),
+        text_generator=lambda *_args, **_kwargs: _raw_plan(),
+        profile=StudentCapabilityProfile(
+            model_id="tiny", bundle_output_chars=100
+        ),
+    )
+    adapter = SpanPlanAdapter(generator=generator)
+    attempt = adapter.run(_task(checkout), _revision(False))
+    assert attempt.structural_valid is False
+    assert attempt.failure_reason == "plan-too-large"
+    assert "100 characters" in attempt.detail

@@ -15,13 +15,16 @@ import json
 import subprocess
 from pathlib import Path
 
-from skill_evolution_loop import StudentTask
+from skill_evolution_loop import LoopRevision, StudentTask
 from skill_evolution_loop.contracts import ContractError
 from skill_evolution_loop.operator_rewrite import (
     OperatorPlan,
     materialize_operator_plan,
 )
+from skill_evolution_loop.capabilities import StudentCapabilityProfile
 from skill_evolution_loop.operator_student import (
+    MlxOperatorPlanGenerator,
+    OperatorPlanAdapter,
     _grounded_repair_detail,
 )
 
@@ -251,3 +254,114 @@ _ORIGINAL_TEST_NAMES = (
     "test_teaching_without_matching_card_falls_back_to_clean_baseline",
     "test_truncated_symbol_excerpt_yields_no_selector_candidates",
 )
+
+
+# --------------------------------------------------------------------------
+# B: model capability profile wiring (operator plan gate + prompt budget)
+# --------------------------------------------------------------------------
+
+
+class _LongOutputGenerator:
+    """Adapter-side stub: returns a long raw plan and carries a profile."""
+
+    def __init__(self, profile: StudentCapabilityProfile, raw: str) -> None:
+        self.profile = profile
+        self._raw = raw
+
+    def __call__(self, task, revision) -> str:
+        return self._raw
+
+
+def test_operator_adapter_plan_too_large_uses_profile_max_plan_chars(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("def compute():\n    return 1\n", encoding="utf-8")
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="operator-fixture",
+        checkout=checkout,
+        instruction="Bump the return value.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    revision = LoopRevision.create(
+        skill_id="operator-fixture-skill",
+        revision_id="operator-baseline",
+        parent_revision_id=None,
+        source_round=8,
+        protocol="python-typed-operator-plan-v1",
+        skill_text="No additional domain teaching is provided.",
+        prompt_template="Return exactly one operator plan JSON object.",
+        eval_note="fixture",
+    )
+    long_raw = "x" * 500
+    generator = _LongOutputGenerator(
+        StudentCapabilityProfile(model_id="tiny", max_plan_chars=100),
+        long_raw,
+    )
+    adapter = OperatorPlanAdapter(generator=generator)
+    attempt = adapter.run(task, revision)
+    assert attempt.structural_valid is False
+    assert attempt.failure_reason == "plan-too-large"
+    assert "100 characters" in attempt.detail
+
+
+def test_operator_generator_prompt_follows_profile_plan_chars(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("def compute():\n    return 1\n", encoding="utf-8")
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="operator-fixture",
+        checkout=checkout,
+        instruction="Bump the return value.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    revision = LoopRevision.create(
+        skill_id="operator-fixture-skill",
+        revision_id="operator-baseline",
+        parent_revision_id=None,
+        source_round=8,
+        protocol="python-typed-operator-plan-v1",
+        skill_text="No additional domain teaching is provided.",
+        prompt_template="Return exactly one operator plan JSON object.",
+        eval_note="fixture",
+    )
+    rendered: list[list[dict[str, str]]] = []
+
+    class Tokenizer:
+        @staticmethod
+        def apply_chat_template(
+            messages, *, add_generation_prompt, enable_thinking, tokenize=False
+        ):
+            assert tokenize is False
+            rendered.append(messages)
+            return "\n".join(row["content"] for row in messages)
+
+    generator = MlxOperatorPlanGenerator(
+        model_path="models/Qwen3.5-4B-mlx-4bit",
+        max_tokens=512,
+        loader=lambda _path: (object(), Tokenizer()),
+        text_generator=lambda *_args, **_kwargs: '{"schema_version":1}',
+        profile=StudentCapabilityProfile(
+            model_id="custom", max_plan_chars=777
+        ),
+    )
+    try:
+        generator(task, revision)
+    except Exception:
+        # Prompt capture is what matters here; invalid plan output may raise.
+        pass
+    assert rendered, "prompt must have been rendered"
+    system_content = rendered[0][0]["content"]
+    assert "under 777 characters" in system_content
+    assert generator.generation_config()["max_plan_chars"] == 777

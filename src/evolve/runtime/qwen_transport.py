@@ -186,6 +186,9 @@ class LegacyQwenCellRunner:
             sys.path.insert(0, root)
         try:
             from mlx_lm import generate, load  # type: ignore[import-not-found]
+            from skill_evolution_loop.capabilities import (  # type: ignore[import-not-found]
+                profile_for,
+            )
             from skill_evolution_loop.operator_student import (  # type: ignore[import-not-found]
                 MlxOperatorPlanGenerator,
                 OperatorPlanAdapter,
@@ -208,17 +211,18 @@ class LegacyQwenCellRunner:
                 loaded.append(load(path))
             return loaded[0]
 
+        capability_profile = profile_for(self.model_path)
         operator_generator = MlxOperatorPlanGenerator(
             model_path=self.model_path,
             loader=shared_loader,
             text_generator=generate,
-            max_plan_repairs=1,
+            profile=capability_profile,
         )
         span_generator = MlxSpanPlanGenerator(
             model_path=self.model_path,
             loader=shared_loader,
             text_generator=generate,
-            max_plan_repairs=1,
+            profile=capability_profile,
         )
         adapters = {
             "operator": OperatorPlanAdapter(generator=operator_generator),

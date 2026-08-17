@@ -10,6 +10,7 @@ from typing import Any
 from .contracts import ContractError, LoopRevision, canonical_json, sha256_json
 from .eval_manifest import EvaluationTaskSet
 from .experiment import PairedExperimentRunner
+from .capabilities import profile_for
 from .operator_student import (
     MlxOperatorPlanGenerator,
     OperatorPlanAdapter,
@@ -206,6 +207,7 @@ def run_local_qwen_operator_p1(
         max_tokens=max_tokens,
         max_context_chars=context_chars,
         enable_thinking=enable_thinking,
+        profile=profile_for(str(model_path.resolve())),
     )
     adapter = OperatorPlanAdapter(generator=generator)
     generation_config = adapter.experiment_config()

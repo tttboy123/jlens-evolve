@@ -11,6 +11,7 @@ from .contracts import ContractError, canonical_json, sha256_json
 from .eval_manifest import EvaluationTaskSet
 from .experiment import PairedExperimentRunner
 from .model_transport import FileCachedModelTransport, OpenAICompatibleTransport
+from .capabilities import profile_for
 from .operator_student import (
     MlxOperatorPlanGenerator,
     OperatorPlanAdapter,
@@ -337,15 +338,18 @@ def _run_round1_cohort(
         if max_plan_repairs is not None
         else (0 if realization_candidates > 1 else 1)
     )
+    capability_profile = profile_for(str(model_path))
     operator_generator = MlxOperatorPlanGenerator(
         model_path=model_path,
         **generator_runtime,
         max_plan_repairs=effective_max_plan_repairs,
+        profile=capability_profile,
     )
     span_generator = MlxSpanPlanGenerator(
         model_path=model_path,
         **generator_runtime,
         max_plan_repairs=effective_max_plan_repairs,
+        profile=capability_profile,
     )
     base_adapters = {
         "operator": OperatorPlanAdapter(generator=operator_generator),
