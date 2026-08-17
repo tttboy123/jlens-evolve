@@ -523,3 +523,45 @@ def test_legacy_unbound_e2_claim_requires_explicit_compatibility_reader(
     assert claim.grade is ClaimGrade.E2
     assert claim.counterfactual_pair_sha256 is None
     assert claim.content_sha256 == record["content_sha256"]
+
+
+def test_prompt_lineage_requires_embedded_prompt_texts() -> None:
+    """Regression: frozen qwen cell RESULTs carried prompt_sha256 but no
+    prompt_texts, so any natively-resolved baseline hit
+    'baseline prompt evidence is missing or invalid'.  The lineage validator
+    must accept embedded prompt_texts and reject the hash-only shape."""
+    from evolve.contracts import ContractViolation
+    from evolve.evidence.counterfactual import _validate_prompt_lineage
+
+    prompt = "SYSTEM: baseline repair\nUSER: fix the bug"
+    ok = {
+        "prompt_texts": [prompt],
+        "prompt_sha256": [_sha(prompt)],
+        "candidate_prompt": None,
+        "candidate_prompt_sha256": None,
+        "compiled_artifact_sha256": {},
+    }
+    # With embedded prompt_texts the lineage validates (returns bundle hash).
+    bundle_hash, bundled = _validate_prompt_lineage(
+        "baseline",
+        ok,
+        candidate_revision_id="candidate-r1",
+        candidate_bundle_sha256="a" * 64,
+    )
+    assert isinstance(bundle_hash, str) and bundle_hash
+
+    # The old frozen shape (hashes only, no prompt_texts) is rejected.
+    broken = {
+        "prompt_texts": None,
+        "prompt_sha256": [_sha(prompt)],
+        "candidate_prompt": None,
+        "candidate_prompt_sha256": None,
+        "compiled_artifact_sha256": {},
+    }
+    with pytest.raises(ContractViolation):
+        _validate_prompt_lineage(
+            "baseline",
+            broken,
+            candidate_revision_id="candidate-r1",
+            candidate_bundle_sha256="a" * 64,
+        )

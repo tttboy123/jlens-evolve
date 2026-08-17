@@ -376,6 +376,9 @@ class LegacyQwenCellRunner:
                     for index, prompt in enumerate(prompts)
                     if prompt is not None
                 ],
+                "prompt_texts": [
+                    prompt for prompt in prompts if prompt is not None
+                ],
                 "structural_valid": attempt.structural_valid,
                 "failure_reason": attempt.failure_reason,
                 "elapsed_seconds": round(elapsed, 6),
