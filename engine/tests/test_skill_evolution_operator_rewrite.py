@@ -571,3 +571,21 @@ def test_operator_operation_rejects_non_operator_as_key_shape() -> None:
         pass
     else:  # pragma: no cover
         raise AssertionError("unknown operator-as-key must be rejected")
+
+
+def test_operator_operation_normalizes_flattened_operator_as_key_shape() -> None:
+    """Flattened variant {"<op>": {"source","occurrence","arguments"}} normalizes too."""
+    from skill_evolution_loop.operator_rewrite import OperatorOperation
+
+    op = OperatorOperation.from_dict(
+        {
+            "replace_condition": {
+                "source": "len(x) == 0",
+                "occurrence": 1,
+                "arguments": {"new_condition": "x is None"},
+            }
+        }
+    )
+    assert op.operator == "replace_condition"
+    assert op.selector == {"source": "len(x) == 0", "occurrence": 1}
+    assert op.arguments == {"new_condition": "x is None"}

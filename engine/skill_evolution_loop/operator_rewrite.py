@@ -98,6 +98,21 @@ class OperatorOperation:
             payload = data[operator_name]
             if set(payload) == {"selector", "arguments"}:
                 data = {"operator": operator_name, **payload}
+            elif (
+                "arguments" in payload
+                and isinstance(payload["arguments"], dict)
+                and "source" in payload
+            ):
+                # Flattened variant: {"<op>": {"source": ..., "occurrence": ...,
+                # "arguments": {...}}} -> selector wrapped back under "selector".
+                data = {
+                    "operator": operator_name,
+                    "selector": {
+                        "source": payload["source"],
+                        "occurrence": payload.get("occurrence", 0),
+                    },
+                    "arguments": payload["arguments"],
+                }
         if set(data) != {"operator", "selector", "arguments"}:
             raise ContractError("operator operation fields are invalid")
         arguments = dict(data["arguments"])
