@@ -967,7 +967,11 @@ def _validate_change_set_source(
             arguments,
             instruction,
             _repair_routes(
-                _candidate_routes(candidate["router"], operator_id),
+                _candidate_routes(
+                    candidate["router"],
+                    operator_id,
+                    required_task_ids=compile_spec.required_route_task_ids,
+                ),
                 compile_spec.required_route_task_ids,
                 operator_id,
             ),
@@ -978,7 +982,11 @@ def _validate_change_set_source(
             candidate["falsification"],
         )
     if teacher["candidate_schema_version"] == 2:
-        provided_routes = _candidate_routes(candidate["router"], operator_id)
+        provided_routes = _candidate_routes(
+            candidate["router"],
+            operator_id,
+            required_task_ids=compile_spec.required_route_task_ids,
+        )
         expected_synthesized = tuple(
             task_id
             for task_id in compile_spec.required_route_task_ids

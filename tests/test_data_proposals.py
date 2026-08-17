@@ -386,3 +386,86 @@ def test_candidate_routes_strict_without_required_ids():
     router = {"routes": {"feedback-x@y": "op-v1"}}
     with pytest.raises(ContractViolation):
         _candidate_routes(router, "op-v1")
+
+
+def test_validate_change_set_source_round1_prefixed_router_schema_v2() -> None:
+    """Regression: teacher Router keys with round1- prefixes must normalize in
+    the integrity re-derivation too, else synthesized projection mismatches."""
+    from evolve.contracts import Cohort
+    from evolve.proposals.candidate_chain import (
+        CandidateChangeSet,
+        CompileSpec,
+        _validate_change_set_source,
+        content_sha256,
+    )
+
+    required = (
+        "django__django-15277",
+        "phpoffice__phpspreadsheet-3463",
+        "django__django-15315",
+    )
+    operator_id = "debug-fix-test-operator"
+    teacher = {
+        "candidate_schema_version": 2,
+        "candidate": {
+            "protocol": "execution-protocol-v1",
+            "prompt_template": "You are an expert software engineer. {instruction}",
+            "skill_text": "Execute the debug-fix-test protocol.",
+            "eval_note": "Native evaluation procedure.",
+            "operator": {
+                "id": operator_id,
+                "kind": "zero-arg",
+                "arguments": [],
+                "instruction": "Execute the debug-fix-test protocol.",
+            },
+            "router": {
+                "routes": {
+                    "round1-django__django-15277": operator_id,
+                    "round1-django__django-15315": operator_id,
+                    "round1-phpoffice__phpspreadsheet-3463": operator_id,
+                }
+            },
+            "memory_policy": {"type": "none"},
+            "preconditions": ["repo checked out"],
+            "expected_external_effect": "patch resolves the issue",
+            "expected_internal_effect": "model produces a correct patch",
+            "falsification": "patch fails",
+        },
+    }
+    compile_spec = CompileSpec(
+        candidate_id="candidate-abc",
+        revision_id="candidate-abc-r0002",
+        parent_revision_id="empty-harness-v1",
+        cohort=Cohort.FEEDBACK,
+        operator_id=operator_id,
+        operator_instruction="Execute the debug-fix-test protocol.",
+        required_route_task_ids=required,
+        routes=tuple((task_id, operator_id) for task_id in required),
+    )
+    change_set = CandidateChangeSet(
+        candidate_id=compile_spec.candidate_id,
+        revision_id=compile_spec.revision_id,
+        parent_revision_id=compile_spec.parent_revision_id,
+        source_candidate_sha256=content_sha256(teacher["candidate"]),
+        compile_spec_sha256=compile_spec.content_sha256,
+        protocol=teacher["candidate"]["protocol"],
+        prompt_template=teacher["candidate"]["prompt_template"],
+        skill_text=teacher["candidate"]["skill_text"],
+        eval_note=teacher["candidate"]["eval_note"],
+        operator_id=operator_id,
+        operator_instruction=teacher["candidate"]["operator"]["instruction"],
+        # Order follows the teacher Router (round1- prefixed -> normalized).
+        routes=(
+            ("django__django-15277", operator_id),
+            ("django__django-15315", operator_id),
+            ("phpoffice__phpspreadsheet-3463", operator_id),
+        ),
+        memory_policy={"type": "none"},
+        preconditions=("repo checked out",),
+        expected_external_effect="patch resolves the issue",
+        expected_internal_effect="model produces a correct patch",
+        falsification="patch fails",
+        synthesized_task_ids=(),
+    )
+    # Must not raise after the round1- prefix normalization fix.
+    _validate_change_set_source(change_set, teacher, compile_spec)
