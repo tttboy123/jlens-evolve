@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evolve-jlens-cluster"
+version = "2.5.0"
+description = "Auditable infrastructure for project-local Agent Skill evolution experiments"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "nbformat>=5.10,<6",
+    "numpy>=2.5,<3",
+    "openevolve",
+    "pandas>=3,<4",
+    "PyYAML>=6,<7",
+    "requests>=2.34,<3",
+    "scikit-learn>=1.9,<2",
+    "scipy>=1.18,<2",
+]
+
+[project.optional-dependencies]
+local-mlx = [
+    "mlx>=0.32,<0.33; sys_platform == 'darwin'",
+    "mlx-lm>=0.31,<0.32; sys_platform == 'darwin'",
+    "transformers>=5.14,<6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+    "ruff>=0.16,<0.17",
+]
+
+[tool.setuptools]
+packages = ["skill_evolution_loop"]
+
+[tool.uv.sources]
+openevolve = { path = "../openevolve", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+extend-exclude = [".runtime", "artifacts", "runs"]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = ["E402", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_release_candidate.py" = ["F401"]

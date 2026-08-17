@@ -27,7 +27,7 @@ The task-pool file is either a JSON list of task objects or an object with
 ```json
 {
   "runtime": {
-    "legacy_root": "/absolute/path/to/evolve-jlens-cluster",
+    "legacy_root": "/absolute/path/to/repo/engine",
     "routes_path": "/absolute/path/to/MECHANISM-ROUTES.json",
     "swe_python": "/absolute/path/to/swe-venv/bin/python",
     "multi_python": "/absolute/path/to/multi-venv/bin/python",

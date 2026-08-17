@@ -1,0 +1,28 @@
+schema_version: 1
+task_id: payout-record-cleaning-v1
+task_family: record-cleaning
+tags: [normalization, filtering, aggregation, validation, sorting]
+state_dir: state/psi-ab-payout-v2-20260802/transfer
+evaluator_core: tasks/payout_cleaning/evaluator_core.py
+behavior_equivalent_limit: 2
+lesson_min_evidence: 2
+experience_limit: 3
+resume: auto
+
+meta_policy:
+  enabled: true
+  stagnation_window: 10
+  candidates:
+    - id: focused-v1
+      temperature: 0.85
+      num_top_programs: 1
+      num_diverse_programs: 0
+    - id: exploratory-v1
+      temperature: 0.95
+      num_top_programs: 1
+      num_diverse_programs: 1
+    - id: exploratory-v2
+      temperature: 0.95
+      num_top_programs: 1
+      num_diverse_programs: 1
+      stochastic_llm: true

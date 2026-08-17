@@ -1,0 +1,17 @@
+Fitness: {fitness_score}
+Evaluator feedback:
+{artifacts}
+
+Current program:
+```{language}
+{current_program}
+```
+
+Improve only `solve(records)` while preserving every passing behavior. Output only
+one or more exact blocks in this format; SEARCH text must match the current program:
+
+<<<<<<< SEARCH
+exact current code
+=======
+concise replacement code
+>>>>>>> REPLACE

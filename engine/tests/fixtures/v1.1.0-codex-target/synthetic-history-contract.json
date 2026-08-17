@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "thread_id": "019f7285-085b-7d92-bf32-5f887f2a9bfd",
+  "source_path": "synthetic-source.jsonl",
+  "source_snapshot": {
+    "indexed_bytes": 11983,
+    "indexed_lines": 55,
+    "sha256_at_index_time": "038e312f2fe694e5b1ea48b46333196331dba25878917aac3b3209f9bdcdd5a0",
+    "synthetic": true
+  },
+  "partitions": {
+    "public": [
+      {
+        "ordinal": 28,
+        "sha256": "f6324404e7c3f2efd23cec882aefd405457d8bfc71c894be1a24f2f64a5ceac0",
+        "task_family": "result_legibility",
+        "required_sections": [
+          "outcome",
+          "evidence",
+          "limitations",
+          "next_action"
+        ]
+      },
+      {
+        "ordinal": 30,
+        "sha256": "2ed647ef33411cc5f33c03915d2f261d2e1a9242a47e46b828c19eeabd2ab94a",
+        "task_family": "evidence_to_change",
+        "required_sections": [
+          "observed_pattern",
+          "causal_boundary",
+          "surface_mapping",
+          "verification"
+        ]
+      },
+      {
+        "ordinal": 31,
+        "sha256": "268a90423cf5a17126d7b590989a375148741daaf80987861df56db8efc6a031",
+        "task_family": "evidence_to_change",
+        "required_sections": [
+          "failure_hypothesis",
+          "surface_mapping",
+          "changeset",
+          "verification"
+        ]
+      },
+      {
+        "ordinal": 33,
+        "sha256": "6d68f5400398b7490088d5370b4b9e1a49d1ae9b0cd06beed35d92d2416c8b49",
+        "task_family": "operation_contract",
+        "required_sections": [
+          "entrypoint",
+          "process",
+          "artifacts",
+          "decision_gate"
+        ]
+      },
+      {
+        "ordinal": 34,
+        "sha256": "f24c8cdd945eee971338a77574cc82aff5e0e1fa5f92d9b2eaf7e834014ec16f",
+        "task_family": "operation_contract",
+        "required_sections": [
+          "minimal_scope",
+          "process",
+          "decision_gate",
+          "next_action"
+        ]
+      },
+      {
+        "ordinal": 38,
+        "sha256": "16984f8267e0f9baabc634730d4ad4fd9dec7c879e9548a88a03110ee692d5d2",
+        "task_family": "complexity_control",
+        "required_sections": [
+          "complexity_cause",
+          "minimal_scope",
+          "removal_list",
+          "acceptance"
+        ]
+      },
+      {
+        "ordinal": 39,
+        "sha256": "af6b953f21a13f1725eb936b4b81a72250a0f949937bf50ea133f1affe4adea6",
+        "task_family": "complexity_control",
+        "required_sections": [
+          "module_boundaries",
+          "interfaces",
+          "migration",
+          "rollback"
+        ]
+      },
+      {
+        "ordinal": 40,
+        "sha256": "d184654bac3526600d89fd8c6dd8bd3a81f828b2b61ef53ab822a8cd86859bc6",
+        "task_family": "plugin_boundary",
+        "required_sections": [
+          "observer_boundary",
+          "plugin_contract",
+          "default_state",
+          "integration_test"
+        ]
+      }
+    ],
+    "sealed": [
+      {
+        "ordinal": 46,
+        "sha256": "b3eb0dc11567e9ec8ed43b1752eaa9a62d5e22ae59cd260329b10a3c708c31ba",
+        "task_family": "complexity_control",
+        "required_sections": [
+          "minimal_scope",
+          "visible_effect",
+          "milestones",
+          "acceptance"
+        ]
+      },
+      {
+        "ordinal": 47,
+        "sha256": "cc0761f1d06415b0345447b90418c786d185c23dffb5c49c6baf01c6241f81e4",
+        "task_family": "evaluation_disclosure",
+        "required_sections": [
+          "dataset_provenance",
+          "partition",
+          "causal_boundary",
+          "surface_mapping"
+        ]
+      },
+      {
+        "ordinal": 50,
+        "sha256": "7e8fe605a4da325d262812c3ebd08f0ff3f6bceb982cbbabbfddd7a72a34c2c4",
+        "task_family": "operation_contract",
+        "required_sections": [
+          "entrypoint",
+          "commands",
+          "artifacts",
+          "failure_modes"
+        ]
+      },
+      {
+        "ordinal": 51,
+        "sha256": "b5e3c0bdd0f6fc77907b64dbf19ade4c1dcd55bc9563abaf7fe8cff0308c279b",
+        "task_family": "result_legibility",
+        "required_sections": [
+          "report_path",
+          "outcome",
+          "evidence",
+          "decision"
+        ]
+      },
+      {
+        "ordinal": 52,
+        "sha256": "a822477e029e706357b7122ad808b89723fe15156910cc44717edbe83b93373f",
+        "task_family": "evidence_to_change",
+        "required_sections": [
+          "failure_hypothesis",
+          "surface_mapping",
+          "changeset",
+          "rollback"
+        ]
+      },
+      {
+        "ordinal": 53,
+        "sha256": "7e921eab640e76913cb311faa36370f92adb5bbe2e6021d3ffabe2a85d01e681",
+        "task_family": "layer_positioning",
+        "required_sections": [
+          "current_level",
+          "target_level",
+          "missing_capability",
+          "validation_boundary"
+        ]
+      }
+    ],
+    "meta_public": [
+      {
+        "ordinal": 41,
+        "sha256": "51bb6dcf87e0d211a47ec6ee54941490d9a569e90a00539a881d8c20dcd80407",
+        "task_family": "research_comparison",
+        "required_sections": [
+          "comparators",
+          "evidence",
+          "differences",
+          "transfer_limit"
+        ]
+      },
+      {
+        "ordinal": 42,
+        "sha256": "ccacee415f84f67cf05e0b7f12b676edd1a145fde3195ee599a03163a6d7356a",
+        "task_family": "coevolution",
+        "required_sections": [
+          "control_definition",
+          "coevolution_definition",
+          "evaluator_risk",
+          "plugin_contract"
+        ]
+      },
+      {
+        "ordinal": 43,
+        "sha256": "303fec4cc724a08f394d8c7ec53db0e2bdaf4f63f91aeafe2c5420f34e1aea37",
+        "task_family": "supervision",
+        "required_sections": [
+          "supervisor_role",
+          "authority_boundary",
+          "feedback_artifact",
+          "admission_gate"
+        ]
+      }
+    ],
+    "meta_sealed": [
+      {
+        "ordinal": 44,
+        "sha256": "6744d8ddcfc2c30f7895c86c1f5c66776a3204ac4f6cfb2ec40fc65be68a92e1",
+        "task_family": "supervision",
+        "required_sections": [
+          "provider_interface",
+          "trust_boundary",
+          "cost_policy",
+          "admission_gate"
+        ]
+      },
+      {
+        "ordinal": 45,
+        "sha256": "9663a305f4f67f1fb29045cc3601c1acf062e7f1705ecfa9a46f0fe8f558ce65",
+        "task_family": "architecture",
+        "required_sections": [
+          "components",
+          "data_flow",
+          "authority_boundary",
+          "artifacts"
+        ]
+      },
+      {
+        "ordinal": 48,
+        "sha256": "1f11e82e330b0532f1ea24df587256ded8447900d06fd8efc58a253472ac40b0",
+        "task_family": "poc_delivery",
+        "required_sections": [
+          "minimal_scope",
+          "entrypoint",
+          "process_evidence",
+          "convergence",
+          "failure_cause"
+        ]
+      }
+    ]
+  }
+}

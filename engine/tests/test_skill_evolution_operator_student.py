@@ -1,0 +1,253 @@
+"""Operator student behavior regression tests (A1 + grounded repair).
+
+NOTE: the original 44-test file was accidentally truncated by an operator
+script (``open(...,'w')`` truncates before a failed argument evaluation) and
+was not recoverable from disk.  This reconstruction covers only the contracts
+actually changed/verified by the A1 + grounded-repair work, with fixtures
+verified against the module.  The 44 original test names are preserved at the
+bottom as a coverage checklist; restore the exact original from any external
+copy if available.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+from skill_evolution_loop import StudentTask
+from skill_evolution_loop.contracts import ContractError
+from skill_evolution_loop.operator_rewrite import (
+    OperatorPlan,
+    materialize_operator_plan,
+)
+from skill_evolution_loop.operator_student import (
+    _grounded_repair_detail,
+)
+
+
+def _git_init(path: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "add", "."], cwd=path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "fixture"],
+        cwd=path,
+        check=True,
+    )
+
+
+# --------------------------------------------------------------------------
+# A1: auto-correcting an expression operator on a statement selector
+# --------------------------------------------------------------------------
+
+def test_a1_autocorrects_statement_selector_with_real_replacement(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("def compute():\n    xy = xy_0\n    return xy\n", encoding="utf-8")
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="operator-fixture",
+        checkout=checkout,
+        instruction="Copy the offset before mutating.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    plan = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "compute",
+            "intent": {"defect": "d", "trigger": "t", "desired_boundary": "b"},
+            "operations": [
+                {
+                    "operator": "replace_expression",
+                    "selector": {"source": "xy = xy_0", "occurrence": 0},
+                    "arguments": {"new_expression": "xy = xy_0.copy()"},
+                }
+            ],
+            "diagnostic": "copy the offset",
+        }
+    )
+    result = materialize_operator_plan(module.read_text(encoding="utf-8"), plan)
+    assert result.accepted is True
+    assert "xy = xy_0.copy()" in result.after
+    assert result.after != module.read_text(encoding="utf-8")
+
+
+def test_a1_noop_statement_selector_still_fail_closed(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("def compute():\n    raise ValueError('x')\n", encoding="utf-8")
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="operator-fixture",
+        checkout=checkout,
+        instruction="Change the error message.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    plan = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "compute",
+            "intent": {"defect": "d", "trigger": "t", "desired_boundary": "b"},
+            "operations": [
+                {
+                    "operator": "replace_expression",
+                    "selector": {"source": "raise ValueError('x')", "occurrence": 0},
+                    "arguments": {"new_expression": "raise ValueError('x')"},
+                }
+            ],
+            "diagnostic": "message fix",
+        }
+    )
+    result = materialize_operator_plan(module.read_text(encoding="utf-8"), plan)
+    assert result.accepted is False
+    assert result.failure_reason in {"no-op", "apply-fail"}
+
+
+# --------------------------------------------------------------------------
+# Grounded repair
+# --------------------------------------------------------------------------
+
+def test_grounded_repair_detail_includes_real_symbol_lines(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    src = checkout / "src/example.py"
+    src.parent.mkdir(parents=True)
+    src.write_text(
+        "class Widget:\n"
+        "    def build(self):\n"
+        "        xy = xy_real\n"
+        "        return xy\n",
+        encoding="utf-8",
+    )
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="grounded-repair-fixture",
+        checkout=checkout,
+        instruction="Fix the widget layout offset.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    plan = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "Widget",
+            "intent": {"defect": "d", "trigger": "t", "desired_boundary": "b"},
+            "operations": [
+                {
+                    "operator": "replace_expression",
+                    "selector": {"source": "xy = xy_0", "occurrence": 0},
+                    "arguments": {"new_expression": "xy = xy_0.copy()"},
+                }
+            ],
+            "diagnostic": "phantom selector",
+        }
+    )
+    detail = _grounded_repair_detail(
+        task, plan, ContractError("operator selector did not resolve; matches=0")
+    )
+    assert "xy_real" in detail
+    assert "Grounded source" in detail
+
+
+def test_grounded_repair_detail_noop_hint_path() -> None:
+    detail = _grounded_repair_detail(
+        None, None, ContractError("operator materialization gate failed: no-op")
+    )
+    assert "no-op" in detail
+
+
+def test_grounded_repair_detail_handles_missing_symbol_gracefully(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    src = checkout / "src/example.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def compute():\n    return 0\n", encoding="utf-8")
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="operator-fixture",
+        checkout=checkout,
+        instruction="Fix a bug.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    plan = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "MissingSymbol",
+            "intent": {"defect": "d", "trigger": "t", "desired_boundary": "b"},
+            "operations": [
+                {
+                    "operator": "replace_expression",
+                    "selector": {"source": "x + 1", "occurrence": 0},
+                    "arguments": {"new_expression": "x + 2"},
+                }
+            ],
+            "diagnostic": "fix",
+        }
+    )
+    detail = _grounded_repair_detail(
+        task, plan, ContractError("operator selector did not resolve; matches=0")
+    )
+    assert "selector did not resolve" in detail
+
+
+# --------------------------------------------------------------------------
+# Original 44-test coverage checklist (restore exact bodies from a backup if
+# one exists; this file reconstructs only the A1 + grounded-repair contracts).
+# --------------------------------------------------------------------------
+_ORIGINAL_TEST_NAMES = (
+    "test_ast_selector_harvest_includes_root_ternary_literal_and_header_predicate",
+    "test_boundary_oracle_corrects_wrong_new_condition",
+    "test_condition_header_output_does_not_rewrite_mixed_statement_kinds",
+    "test_condition_header_output_is_canonicalized_to_typed_condition_edit",
+    "test_empty_boundary_query_prioritizes_condition_rewrite_candidates",
+    "test_grounded_repair_detail_includes_real_symbol_lines",
+    "test_grounded_repair_detail_noop_hint_path",
+    "test_harvest_includes_statement_level_edit_sites",
+    "test_issue_symbol_localizer_prioritizes_negated_named_boundary",
+    "test_issue_symbol_localizer_prioritizes_qualified_name_term_overlap",
+    "test_missing_operator_is_inferred_from_unique_argument_shape",
+    "test_numbered_teaching_projection_keeps_baseline_text_unchanged",
+    "test_numbered_teaching_projection_keeps_interface_mandatory_rules",
+    "test_numbered_teaching_projection_preserves_read_only_shared_context",
+    "test_numbered_teaching_projection_selects_task_relevant_rules",
+    "test_operator_adapter_accepts_explicit_unresolved_abstention",
+    "test_operator_adapter_classifies_expression_used_for_statement",
+    "test_operator_adapter_fails_closed_on_selector_miss",
+    "test_operator_adapter_materializes_plan_and_records_receipt",
+    "test_operator_adapter_preserves_unbound_name_failure_taxonomy",
+    "test_operator_adapter_rejects_mapping_get_as_empty_sequence_fix",
+    "test_operator_adapter_rejects_plan_over_r010_budget",
+    "test_operator_conditions_vary_only_teaching_content",
+    "test_operator_generator_does_not_retry_deterministic_noop_failure",
+    "test_operator_generator_keeps_user_prompt_fixed_between_arms",
+    "test_operator_generator_labels_nested_anchor_with_qualified_symbol",
+    "test_operator_generator_runs_one_same_diagnosis_clause_repair",
+    "test_operator_generator_uses_frozen_shared_symbol_as_its_only_context",
+    "test_operator_skill_compiles_only_strategy_requirements",
+    "test_r019_rejects_identifier_typo_not_grounded_in_selector_or_intent",
+    "test_r019_rejects_unresolved_diagnostic_with_nonempty_operations",
+    "test_r020_allows_grounded_length_predicate_for_empty_boundary",
+    "test_r020_rejects_truthiness_only_rewrite_for_empty_vs_absent_boundary",
+    "test_r023_accepts_condition_matching_minimal_boundary_oracle",
+    "test_r023_generator_repairs_semantic_oracle_mismatch_before_returning",
+    "test_r023_rejects_condition_that_violates_minimal_boundary_oracle",
+    "test_replace_condition_full_header_selector_is_reduced_to_predicate",
+    "test_selected_pattern_card_constrains_the_operator_catalog",
+    "test_selected_single_operator_replaces_a_freeform_operation_shape",
+    "test_shared_selector_candidates_harvest_full_file_not_symbol_excerpt",
+    "test_single_allowed_operator_is_canonicalized_without_semantic_inference",
+    "test_symbol_localizer_prefers_absolute_overlap_over_short_decoy",
+    "test_teaching_without_matching_card_falls_back_to_clean_baseline",
+    "test_truncated_symbol_excerpt_yields_no_selector_candidates",
+)

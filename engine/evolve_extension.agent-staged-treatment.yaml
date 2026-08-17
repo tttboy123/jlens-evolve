@@ -1,0 +1,35 @@
+schema_version: 1
+task_id: transaction-record-cleaning-v1
+task_family: record-cleaning
+tags: [normalization, filtering, aggregation, validation, sorting]
+state_dir: state/agent-ab-jlens-20260802/staged-treatment
+behavior_equivalent_limit: 2
+lesson_min_evidence: 2
+experience_limit: 3
+resume: auto
+
+# This arm intentionally runs focused-v1 first, then resumes from its checkpoint
+# with jlens-guided-v1. The runtime records the full schedule in the manifest.
+meta_policy:
+  enabled: true
+  stagnation_window: 5
+  candidates:
+    - id: focused-v1
+      temperature: 0.85
+      num_top_programs: 1
+      num_diverse_programs: 0
+    - id: exploratory-v1
+      temperature: 0.95
+      num_top_programs: 1
+      num_diverse_programs: 1
+    - id: exploratory-v2
+      temperature: 0.95
+      num_top_programs: 1
+      num_diverse_programs: 1
+      stochastic_llm: true
+    - id: jlens-guided-v1
+      temperature: 0.95
+      num_top_programs: 1
+      num_diverse_programs: 1
+      stochastic_llm: true
+      agent_strategy_file: analysis/agent-baseline/agent_strategy.json

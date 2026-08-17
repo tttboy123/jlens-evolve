@@ -1,0 +1,74 @@
+max_iterations: 50
+checkpoint_interval: 5
+log_level: INFO
+random_seed: 20260802
+language: python
+
+llm:
+  primary_model: "models/Qwen2.5-Coder-7B-Instruct-4bit"
+  primary_model_weight: 1.0
+  api_base: "http://127.0.0.1:18080/v1"
+  api_key: "local-experiment"
+  temperature: 0.85
+  top_p: 0.95
+  max_tokens: 512
+  timeout: 180
+  retries: 2
+  retry_delay: 2
+
+prompt:
+  system_message: >-
+    You improve a small pure-Python function solve(records). It must keep only
+    settled USD payout dictionaries, normalize accounts and state with
+    strip/lower and currency with strip/upper, reject malformed rows and
+    bool/non-numeric/non-positive/non-finite values, aggregate totals per
+    account, round totals to two decimals, and sort by total descending then
+    account ascending. Use only deterministic pure Python; math is the only
+    allowed import. Never access files, processes, environment, network,
+    reflection, eval, or exec. Preserve solve(records). Use evaluator artifacts
+    to target failing component groups while retaining already-passing behavior.
+    Output only one fenced Python program, with no prose, comments, docstrings,
+    tests, or examples. Keep the whole program at most 40 lines.
+  template_dir: "../../templates"
+  num_top_programs: 1
+  num_diverse_programs: 0
+  use_template_stochasticity: false
+  include_artifacts: true
+  max_artifact_bytes: 4000
+
+database:
+  population_size: 12
+  archive_size: 6
+  num_islands: 1
+  elite_selection_ratio: 0.25
+  exploration_ratio: 0.25
+  exploitation_ratio: 0.65
+  feature_dimensions: ["case_pass_rate", "ast_complexity"]
+  feature_bins:
+    case_pass_rate: 15
+    ast_complexity: 6
+  migration_interval: 50
+  migration_rate: 0.0
+  random_seed: 20260802
+  log_prompts: true
+
+evaluator:
+  timeout: 15
+  max_retries: 1
+  cascade_evaluation: false
+  parallel_evaluations: 1
+  use_llm_feedback: false
+  enable_artifacts: true
+
+evolution_trace:
+  enabled: true
+  format: jsonl
+  include_code: true
+  include_prompts: true
+  output_path: null
+  buffer_size: 1
+  compress: false
+
+diff_based_evolution: false
+max_code_length: 8000
+early_stopping_patience: null

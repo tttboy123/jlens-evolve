@@ -1,0 +1,466 @@
+{
+  "schema_version": 1,
+  "total_feedback_instances_measured": 117,
+  "file_level_recall_by_policy": {
+    "issue-static-symbol-localization-v2": {
+      "n": 89,
+      "hit": 64,
+      "recall": 0.7191
+    },
+    "neutral-plan-intent-localization-v1": {
+      "n": 19,
+      "hit": 19,
+      "recall": 1.0
+    },
+    "issue-first-target-fallback-v1": {
+      "n": 5,
+      "hit": 5,
+      "recall": 1.0
+    },
+    "issue-static-operator-localization-v3": {
+      "n": 4,
+      "hit": 4,
+      "recall": 1.0
+    }
+  },
+  "symbol_level_recall_by_policy": {
+    "issue-static-symbol-localization-v2": {
+      "n": 89,
+      "hit": 23,
+      "recall": 0.2584
+    },
+    "neutral-plan-intent-localization-v1": {
+      "n": 19,
+      "hit": 10,
+      "recall": 0.5263
+    },
+    "issue-first-target-fallback-v1": {
+      "n": 5,
+      "hit": 0,
+      "recall": 0.0
+    },
+    "issue-static-operator-localization-v3": {
+      "n": 4,
+      "hit": 4,
+      "recall": 1.0
+    }
+  },
+  "misses": [
+    {
+      "instance_id": "django__django-13933",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/forms/models.py"
+      ],
+      "gold_symbols": [
+        "to_python"
+      ],
+      "harvested_files": [
+        "django/forms/fields.py"
+      ],
+      "harvested_symbol": "MultipleChoiceField"
+    },
+    {
+      "instance_id": "django__django-15315",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/db/models/fields/__init__.py"
+      ],
+      "gold_symbols": [
+        "__lt__"
+      ],
+      "harvested_files": [
+        "django/db/models/query.py"
+      ],
+      "harvested_symbol": "QuerySet"
+    },
+    {
+      "instance_id": "psf__requests-1921",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "requests/sessions.py"
+      ],
+      "gold_symbols": [
+        "merge_setting"
+      ],
+      "harvested_files": [
+        "requests/structures.py"
+      ],
+      "harvested_symbol": "CaseInsensitiveDict"
+    },
+    {
+      "instance_id": "pytest-dev__pytest-7236",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "src/_pytest/unittest.py"
+      ],
+      "gold_symbols": [
+        "_make_xunit_fixture",
+        "check_testcase_implements_trial_reporter",
+        "collect",
+        "runtest"
+      ],
+      "harvested_files": [
+        "testing/acceptance_test.py"
+      ],
+      "harvested_symbol": "TestInvocationVariants"
+    },
+    {
+      "instance_id": "sympy__sympy-19495",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sympy/sets/conditionset.py"
+      ],
+      "gold_symbols": [
+        "ConditionSet",
+        "_eval_subs"
+      ],
+      "harvested_files": [
+        "sympy/solvers/solveset.py"
+      ],
+      "harvested_symbol": "substitution"
+    },
+    {
+      "instance_id": "django__django-10097",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/core/validators.py"
+      ],
+      "gold_symbols": [
+        "URLValidator"
+      ],
+      "harvested_files": [
+        "django/db/models/sql/query.py"
+      ],
+      "harvested_symbol": "Query"
+    },
+    {
+      "instance_id": "django__django-13821",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/db/backends/sqlite3/base.py"
+      ],
+      "gold_symbols": [
+        "list_aggregate"
+      ],
+      "harvested_files": [
+        "django/db/backends/sqlite3/features.py"
+      ],
+      "harvested_symbol": "DatabaseFeatures"
+    },
+    {
+      "instance_id": "django__django-14351",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/db/models/lookups.py"
+      ],
+      "gold_symbols": [
+        "process_rhs"
+      ],
+      "harvested_files": [
+        "django/db/models/sql/query.py"
+      ],
+      "harvested_symbol": "Query"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-7757",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/util/inspect.py"
+      ],
+      "gold_symbols": [
+        "signature_from_str"
+      ],
+      "harvested_files": [
+        "sphinx/domains/python.py"
+      ],
+      "harvested_symbol": "PyObject"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-9658",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/ext/autodoc/mock.py"
+      ],
+      "gold_symbols": [
+        "_MockObject",
+        "__new__",
+        "_make_subclass"
+      ],
+      "harvested_files": [
+        "sphinx/application.py"
+      ],
+      "harvested_symbol": "Sphinx"
+    },
+    {
+      "instance_id": "django__django-13821",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/db/backends/sqlite3/base.py"
+      ],
+      "gold_symbols": [
+        "list_aggregate"
+      ],
+      "harvested_files": [
+        "django/db/backends/sqlite3/features.py"
+      ],
+      "harvested_symbol": "DatabaseFeatures"
+    },
+    {
+      "instance_id": "django__django-14351",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/db/models/lookups.py"
+      ],
+      "gold_symbols": [
+        "process_rhs"
+      ],
+      "harvested_files": [
+        "django/db/models/sql/query.py"
+      ],
+      "harvested_symbol": "Query"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-7757",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/util/inspect.py"
+      ],
+      "gold_symbols": [
+        "signature_from_str"
+      ],
+      "harvested_files": [
+        "sphinx/domains/python.py"
+      ],
+      "harvested_symbol": "PyObject"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-9658",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/ext/autodoc/mock.py"
+      ],
+      "gold_symbols": [
+        "_MockObject",
+        "__new__",
+        "_make_subclass"
+      ],
+      "harvested_files": [
+        "sphinx/application.py"
+      ],
+      "harvested_symbol": "Sphinx"
+    },
+    {
+      "instance_id": "django__django-13821",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/db/backends/sqlite3/base.py"
+      ],
+      "gold_symbols": [
+        "list_aggregate"
+      ],
+      "harvested_files": [
+        "django/db/backends/sqlite3/features.py"
+      ],
+      "harvested_symbol": "DatabaseFeatures"
+    },
+    {
+      "instance_id": "django__django-14351",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "django/db/models/lookups.py"
+      ],
+      "gold_symbols": [
+        "process_rhs"
+      ],
+      "harvested_files": [
+        "django/db/models/sql/query.py"
+      ],
+      "harvested_symbol": "Query"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-7757",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/util/inspect.py"
+      ],
+      "gold_symbols": [
+        "signature_from_str"
+      ],
+      "harvested_files": [
+        "sphinx/domains/python.py"
+      ],
+      "harvested_symbol": "PyObject"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-9658",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/ext/autodoc/mock.py"
+      ],
+      "gold_symbols": [
+        "_MockObject",
+        "__new__",
+        "_make_subclass"
+      ],
+      "harvested_files": [
+        "sphinx/application.py"
+      ],
+      "harvested_symbol": "Sphinx"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-7757",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/util/inspect.py"
+      ],
+      "gold_symbols": [
+        "signature_from_str"
+      ],
+      "harvested_files": [
+        "sphinx/domains/python.py"
+      ],
+      "harvested_symbol": "PyObject"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-7757",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/util/inspect.py"
+      ],
+      "gold_symbols": [
+        "signature_from_str"
+      ],
+      "harvested_files": [
+        "sphinx/domains/python.py"
+      ],
+      "harvested_symbol": "PyObject"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-9658",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/ext/autodoc/mock.py"
+      ],
+      "gold_symbols": [
+        "_MockObject",
+        "__new__",
+        "_make_subclass"
+      ],
+      "harvested_files": [
+        "sphinx/application.py"
+      ],
+      "harvested_symbol": "Sphinx"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-7757",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/util/inspect.py"
+      ],
+      "gold_symbols": [
+        "signature_from_str"
+      ],
+      "harvested_files": [
+        "sphinx/domains/python.py"
+      ],
+      "harvested_symbol": "PyObject"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-9658",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/ext/autodoc/mock.py"
+      ],
+      "gold_symbols": [
+        "_MockObject",
+        "__new__",
+        "_make_subclass"
+      ],
+      "harvested_files": [
+        "sphinx/application.py"
+      ],
+      "harvested_symbol": "Sphinx"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-7757",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/util/inspect.py"
+      ],
+      "gold_symbols": [
+        "signature_from_str"
+      ],
+      "harvested_files": [
+        "sphinx/domains/python.py"
+      ],
+      "harvested_symbol": "PyObject"
+    },
+    {
+      "instance_id": "sphinx-doc__sphinx-9658",
+      "policy": "issue-static-symbol-localization-v2",
+      "file_hit": false,
+      "symbol_hit": false,
+      "gold_files": [
+        "sphinx/ext/autodoc/mock.py"
+      ],
+      "gold_symbols": [
+        "_MockObject",
+        "__new__",
+        "_make_subclass"
+      ],
+      "harvested_files": [
+        "sphinx/application.py"
+      ],
+      "harvested_symbol": "Sphinx"
+    }
+  ]
+}

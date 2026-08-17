@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.runtime/
+
+# Local data / weights / caches (never push)
+models/
+hf-cache/
+artifacts/
+runs/
+logs/
+state/
+analysis/
+*.log
+smoke-response.json
+
+# Env / secrets
+.env
+*.pem
+*.key

@@ -1,0 +1,20 @@
+schema_version: 1
+task_id: transaction-record-cleaning-v1
+task_family: record-cleaning
+tags: [normalization, filtering, aggregation, validation, sorting]
+state_dir: state/agent-ab-novelty-v3/control
+behavior_equivalent_limit: 2
+lesson_min_evidence: 2
+experience_limit: 3
+resume: auto
+
+meta_policy:
+  enabled: true
+  stagnation_window: 3
+  candidates:
+    - id: shadow-control-v3
+      temperature: 0.85
+      num_top_programs: 1
+      num_diverse_programs: 0
+      proposal_controller_mode: shadow-control
+      proposal_controller_file: analysis/proposal-controller/shadow-control-v3.json

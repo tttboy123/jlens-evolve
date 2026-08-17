@@ -1,0 +1,19 @@
+Fitness: {fitness_score}
+MAP region: {feature_coords}
+Focus:
+{improvement_areas}
+
+Evaluator evidence:
+{artifacts}
+
+Accepted reference:
+{evolution_history}
+
+Current program:
+```{language}
+{current_program}
+```
+
+Fix the single target failure without changing any listed passing case. Return one
+complete program preserving `solve(records)`. Output only a fenced Python block;
+no prose, comments, docstrings, tests, or examples. At most 40 lines.
