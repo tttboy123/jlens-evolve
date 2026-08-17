@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .contracts import ContractError, LoopRevision, canonical_json
 from .experiment import ExperimentCondition
@@ -1101,6 +1101,190 @@ class OperatorPlanAdapter(StudentAdapter):
         )
 
 
+def _call_name(node: ast.Call) -> str | None:
+    """Best-effort callee name for a Call node."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _call_names_in_source(source: str) -> tuple[str, ...]:
+    """Unique callee names appearing in a (possibly partial) source snippet."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ()
+    names: list[str] = []
+    seen: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node)
+        if name and name.casefold() not in seen:
+            seen.add(name.casefold())
+            names.append(name)
+    return tuple(names)
+
+
+def _repository_call_exemplars(
+    source: str,
+    call_name: str,
+    *,
+    exclude_sources: frozenset[str] = frozenset(),
+    max_exemplars: int = 2,
+    max_chars: int = 400,
+) -> tuple[tuple[int, str], ...]:
+    """Deterministic sibling usages of one call inside the same source file.
+
+    Read-only reference for the Student: when it edits one call (for example
+    ``raise ValidationError(self.error_messages['invalid_choice'], ...)``
+    without ``params=``), show how the same call is made elsewhere in the repo
+    so the correct library idiom is visible.  Richer calls (more keyword
+    arguments) rank first; the edited call's own source is excluded.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ()
+    needle = call_name.casefold()
+    seen: set[str] = set(exclude_sources)
+    rows: list[tuple[int, str, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node)
+        if name is None or name.casefold() != needle:
+            continue
+        text = ast.get_source_segment(source, node)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        rows.append((node.lineno or 0, text, len(node.keywords)))
+    rows.sort(key=lambda row: (-row[2], row[0]))
+    result: list[tuple[int, str]] = []
+    used = 0
+    for lineno, text, _bonus in rows:
+        if len(result) >= max_exemplars or used + len(text) > max_chars:
+            break
+        result.append((lineno, text))
+        used += len(text)
+    return tuple(result)
+
+
+def _usage_exemplars_block(
+    sources: dict[str, str],
+    contexts: tuple[tuple[str, str, int], ...],
+    *,
+    per_file_candidates: Mapping[str, list[dict[str, Any]]] | None = None,
+    max_calls: int = 3,
+    max_exemplars_per_call: int = 2,
+    max_total_chars: int = 700,
+) -> str:
+    """Render a bounded read-only exemplar section for the calls the Student is
+    most likely to edit.
+
+    Call names are collected from the framework-enumerated editable candidates
+    first (the exact spans the model may rewrite), then from the symbol excerpt
+    as a fallback.  Exemplars are harvested from the full file source, so the
+    model sees how the same call is made elsewhere in the repo.
+    """
+    sections: list[str] = []
+    used = 0
+    candidates = per_file_candidates or {}
+    for relative, excerpt, _line in contexts:
+        full_source = sources.get(relative, "")
+        if not full_source:
+            continue
+        call_names: list[str] = []
+        seen: set[str] = set()
+
+        def add_call_name(name: str) -> None:
+            if name.casefold() not in seen:
+                seen.add(name.casefold())
+                call_names.append(name)
+
+        for row in candidates.get(relative, ()):
+            for name in _call_names_in_source(str(row.get("source", ""))):
+                add_call_name(name)
+        for name in _call_names_in_source(excerpt):
+            add_call_name(name)
+        exclude = frozenset(_call_texts_in_source(excerpt))
+        for name in call_names[:max_calls]:
+            for lineno, text in _repository_call_exemplars(
+                full_source,
+                name,
+                exclude_sources=exclude,
+                max_exemplars=max_exemplars_per_call,
+            ):
+                block = f"{relative}:{lineno} :: {text}"
+                if used + len(block) > max_total_chars:
+                    return "\n".join(sections)
+                sections.append(block)
+                used += len(block)
+    return "\n".join(sections)
+
+
+def _call_texts_in_source(source: str) -> tuple[str, ...]:
+    """Source text of every Call node in a snippet (for exclusion)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return ()
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            text = ast.get_source_segment(source, node)
+            if text:
+                out.append(text)
+    return tuple(out)
+
+
+def _plan_usage_exemplars(
+    task: StudentTask,
+    plan: OperatorPlan,
+    *,
+    max_exemplars_per_call: int = 2,
+    max_total_chars: int = 600,
+) -> str:
+    """Harvest repository usage exemplars for the calls in a rejected plan.
+
+    Used in the grounded-repair replan so the Student sees how the same calls
+    are made elsewhere in the repo (e.g. ValidationError with params=) before
+    it rewrites its selector/replacement.
+    """
+    try:
+        source = task.resolve_target(plan.file).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except (ContractError, OSError, UnicodeError):
+        return ""
+    sections: list[str] = []
+    used = 0
+    seen_names: set[str] = set()
+    for operation in plan.operations:
+        selector = str(operation.selector.get("source", ""))
+        for name in _call_names_in_source(selector):
+            if name.casefold() in seen_names:
+                continue
+            seen_names.add(name.casefold())
+            exclude = frozenset(_call_texts_in_source(selector))
+            for lineno, text in _repository_call_exemplars(
+                source,
+                name,
+                exclude_sources=exclude,
+                max_exemplars=max_exemplars_per_call,
+            ):
+                block = f"{plan.file}:{lineno} :: {text}"
+                if used + len(block) > max_total_chars:
+                    return "\n".join(sections)
+                sections.append(block)
+                used += len(block)
+    return "\n".join(sections)
+
+
 def _shared_operator_target(skill_text: str) -> tuple[str, str] | None:
     marker = "## Shared diagnosis and localization (read-only)"
     if marker not in skill_text:
@@ -1267,13 +1451,22 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
             )
             for relative, excerpt, line in contexts
         )
+        per_file_candidates: dict[str, list[dict[str, Any]]] = {}
+        if shared_target is not None:
+            for relative, excerpt, _line in contexts:
+                per_file_candidates[relative] = list(
+                    _harvest_typed_selector_candidates(
+                        excerpt,
+                        instruction=task.instruction,
+                        maximum_candidates=128,
+                    )
+                )
         rendered_candidates = (
             "Not available until deterministic shared localization is frozen."
             if shared_target is None
             else "\n\n".join(
-                f"### {relative}\n"
-                f"{canonical_json(list(_harvest_typed_selector_candidates(excerpt, instruction=task.instruction, maximum_candidates=128)))}"
-                for relative, excerpt, _line in contexts
+                f"### {relative}\n{canonical_json(rows)}"
+                for relative, rows in per_file_candidates.items()
             )
         )
         candidate_instructions = (
@@ -1288,12 +1481,24 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
                 "new_condition when its semantics matches the frozen diagnosis:"
             )
         )
+        rendered_exemplars = _usage_exemplars_block(
+            sources, contexts, per_file_candidates=per_file_candidates
+        )
+        exemplar_section = (
+            "\n\n"
+            "Repository usage exemplars (read-only reference - how these calls "
+            "are made elsewhere in the repo; prefer their idiom when writing "
+            f"replacements):\n{rendered_exemplars}"
+            if rendered_exemplars
+            else ""
+        )
         user = (
             f"Task: {task.instruction}\n\n"
             f"Allowed candidate files: {canonical_json(list(allowed_files))}\n\n"
             f"Python symbol anchors:\n{rendered_context}\n\n"
             f"{candidate_instructions}\n"
-            f"{rendered_candidates}\n\n"
+            f"{rendered_candidates}"
+            f"{exemplar_section}\n\n"
             "Return the typed operator plan JSON now. Copy the file path and "
             "qualified symbol name from the supplied source."
         )
@@ -1440,6 +1645,17 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
                         " Your replacement equals the selector or changes nothing; "
                         "make a real behavior change using lines from the grounded source."
                     )
+                plan_exemplars = (
+                    _plan_usage_exemplars(task, plan)
+                    if plan is not None
+                    else ""
+                )
+                exemplar_hint = (
+                    "\n\nRepository usage exemplars for the calls in your plan "
+                    "(read-only - match this idiom):\n" + plan_exemplars
+                    if plan_exemplars
+                    else ""
+                )
                 messages = [
                     {"role": "system", "content": system},
                     {
@@ -1449,6 +1665,7 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
                             "once with the same diagnosis. Correct only the typed "
                             "schema, selector kind, statement bound, or operation "
                             f"arguments. Return a fresh complete plan JSON.{hint}"
+                            f"{exemplar_hint}"
                         ),
                     },
                 ]

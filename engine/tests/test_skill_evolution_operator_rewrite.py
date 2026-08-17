@@ -589,3 +589,48 @@ def test_operator_operation_normalizes_flattened_operator_as_key_shape() -> None
     assert op.operator == "replace_condition"
     assert op.selector == {"source": "len(x) == 0", "occurrence": 1}
     assert op.arguments == {"new_condition": "x is None"}
+
+
+def test_operator_operation_normalizes_sibling_arguments_shape() -> None:
+    """Sibling variant {"<op>": {"source","occurrence"}, "arguments": {...}} normalizes too."""
+    from skill_evolution_loop.operator_rewrite import OperatorOperation
+
+    op = OperatorOperation.from_dict(
+        {
+            "replace_condition": {
+                "source": "len(x) == 0",
+                "occurrence": 1,
+            },
+            "arguments": {"new_condition": "x is None"},
+        }
+    )
+    assert op.operator == "replace_condition"
+    assert op.selector == {"source": "len(x) == 0", "occurrence": 1}
+    assert op.arguments == {"new_condition": "x is None"}
+
+
+def test_operator_operation_uses_suggested_operator_when_operator_absent() -> None:
+    from skill_evolution_loop.operator_rewrite import OperatorOperation
+
+    op = OperatorOperation.from_dict(
+        {
+            "suggested_operator": "replace_expression",
+            "selector": {"source": "value + 1", "occurrence": 0},
+            "arguments": {"new_expression": "value + 2"},
+        }
+    )
+    assert op.operator == "replace_expression"
+
+
+def test_operator_operation_drops_redundant_suggested_operator() -> None:
+    from skill_evolution_loop.operator_rewrite import OperatorOperation
+
+    op = OperatorOperation.from_dict(
+        {
+            "operator": "replace_expression",
+            "suggested_operator": "replace_statement",
+            "selector": {"source": "value + 1", "occurrence": 0},
+            "arguments": {"new_expression": "value + 2"},
+        }
+    )
+    assert op.operator == "replace_expression"

@@ -467,3 +467,89 @@ def test_ground_operator_selector_leaves_resolving_selector_untouched(
 
     assert grounded is None
     assert reason == "no selector required grounding"
+
+
+# --------------------------------------------------------------------------
+# Solution 1: repository usage exemplars (library-idiom reference)
+# --------------------------------------------------------------------------
+
+
+def test_repository_call_exemplars_prefers_richer_sibling_usage() -> None:
+    from skill_evolution_loop.operator_student import _repository_call_exemplars
+
+    source = (
+        "def broken(value):\n"
+        "    raise ValidationError('bad', code='bad')\n\n"
+        "def sibling(value):\n"
+        "    raise ValidationError('bad', code='bad', params={'value': value})\n"
+    )
+    target = "raise ValidationError('bad', code='bad')"
+    exemplars = _repository_call_exemplars(
+        source, "ValidationError", exclude_sources=frozenset({target})
+    )
+    assert exemplars, "must find the sibling usage"
+    lineno, text = exemplars[0]
+    assert "params" in text  # richer (more kwargs) sibling ranks first
+    assert target not in text
+
+
+def test_call_names_in_source_extracts_callee() -> None:
+    from skill_evolution_loop.operator_student import _call_names_in_source
+
+    names = _call_names_in_source(
+        "raise ValidationError(self.error_messages['invalid_choice'], code='invalid_choice')"
+    )
+    assert names == ("ValidationError",)
+
+
+def test_plan_usage_exemplars_harvests_from_rejected_plan(tmp_path: Path) -> None:
+    from skill_evolution_loop.operator_student import _plan_usage_exemplars
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "def broken(value):\n"
+        "    raise ValidationError('bad', code='bad')\n\n"
+        "def sibling(value):\n"
+        "    raise ValidationError('bad', code='bad', params={'value': value})\n",
+        encoding="utf-8",
+    )
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="exemplar-fixture",
+        checkout=checkout,
+        instruction="Pass the invalid value to the error.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    plan = _grounding_plan("raise ValidationError('bad', code='bad')")
+    # rewrite the fixture plan to target example.py
+    plan = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "broken",
+            "intent": {
+                "defect": "error lacks the value",
+                "trigger": "invalid input",
+                "desired_boundary": "error carries the value",
+            },
+            "operations": [
+                {
+                    "operator": "replace_statement",
+                    "selector": {
+                        "source": "raise ValidationError('bad', code='bad')",
+                        "occurrence": 0,
+                    },
+                    "arguments": {
+                        "new_statements": "raise ValidationError('bad', code='bad', params={'value': value})"
+                    },
+                }
+            ],
+            "diagnostic": "pass the value",
+        }
+    )
+    exemplars = _plan_usage_exemplars(task, plan)
+    assert "params" in exemplars

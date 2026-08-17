@@ -89,6 +89,21 @@ class OperatorOperation:
         # {"operator": ..., "selector": ..., "arguments": ...} shape.  Only the
         # exact single-key operator-as-key form is accepted; anything else still
         # fails the strict field check below.
+        # The Student sometimes copies the candidate's "suggested_operator"
+        # field into the operation (it appears in the framework-enumerated
+        # candidate JSON).  Use it as the operator when "operator" is absent and
+        # drop it when the canonical field is present.
+        if "suggested_operator" in data:
+            if "operator" not in data and data["suggested_operator"] in _OPERATORS:
+                suggested = data["suggested_operator"]
+                rest = {
+                    k: v for k, v in data.items() if k != "suggested_operator"
+                }
+                data = {"operator": suggested, **rest}
+            else:
+                data = {
+                    k: v for k, v in data.items() if k != "suggested_operator"
+                }
         if (
             len(data) == 1
             and next(iter(data)) in _OPERATORS
@@ -112,6 +127,25 @@ class OperatorOperation:
                         "occurrence": payload.get("occurrence", 0),
                     },
                     "arguments": payload["arguments"],
+                }
+        elif (
+            len(data) == 2
+            and "arguments" in data
+            and isinstance(data["arguments"], dict)
+            and any(key in _OPERATORS for key in data)
+        ):
+            # Sibling variant: {"<op>": {"source": ..., "occurrence": ...},
+            # "arguments": {...}} with arguments OUTSIDE the operator payload.
+            operator_name = next(key for key in data if key in _OPERATORS)
+            payload = data[operator_name]
+            if isinstance(payload, dict) and "source" in payload:
+                data = {
+                    "operator": operator_name,
+                    "selector": {
+                        "source": payload["source"],
+                        "occurrence": payload.get("occurrence", 0),
+                    },
+                    "arguments": data["arguments"],
                 }
         if set(data) != {"operator", "selector", "arguments"}:
             raise ContractError("operator operation fields are invalid")
