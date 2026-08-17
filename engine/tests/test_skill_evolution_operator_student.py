@@ -26,6 +26,7 @@ from skill_evolution_loop.operator_student import (
     MlxOperatorPlanGenerator,
     OperatorPlanAdapter,
     _grounded_repair_detail,
+    _ground_operator_selector,
 )
 
 
@@ -365,3 +366,104 @@ def test_operator_generator_prompt_follows_profile_plan_chars(
     system_content = rendered[0][0]["content"]
     assert "under 777 characters" in system_content
     assert generator.generation_config()["max_plan_chars"] == 777
+
+
+# --------------------------------------------------------------------------
+# Selector grounding: deterministic nearest-candidate re-pointing
+# --------------------------------------------------------------------------
+
+
+def _grounding_task(checkout: Path) -> StudentTask:
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "def compute(value):\n    result = value + 1\n    return result\n",
+        encoding="utf-8",
+    )
+    _git_init(checkout)
+    return StudentTask.create(
+        task_id="ground-fixture",
+        checkout=checkout,
+        instruction="Bump the offset from one to two.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+
+
+def _grounding_plan(selector_source: str) -> OperatorPlan:
+    return OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "compute",
+            "intent": {
+                "defect": "wrong offset",
+                "trigger": "any value",
+                "desired_boundary": "value plus two",
+            },
+            "operations": [
+                {
+                    "operator": "replace_expression",
+                    "selector": {"source": selector_source, "occurrence": 0},
+                    "arguments": {"new_expression": "value + 2"},
+                }
+            ],
+            "diagnostic": "bump the offset",
+        }
+    )
+
+
+def test_ground_operator_selector_repoints_zero_match_to_nearest_candidate(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    task = _grounding_task(checkout)
+    source = (checkout / "src/example.py").read_text(encoding="utf-8")
+    plan = _grounding_plan("value + 2")  # does not exist; nearest is value + 1
+
+    grounded, reason = _ground_operator_selector(
+        task, plan, {"src/example.py": source}
+    )
+
+    assert reason is None
+    assert grounded is not None
+    selector = grounded.operations[0].selector["source"]
+    assert selector == "value + 1"
+    assert source.count(selector) == 1
+    result = materialize_operator_plan(source, grounded)
+    assert result.accepted is True
+    assert "value + 2" in result.after
+
+
+def test_ground_operator_selector_rejects_below_threshold(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    task = _grounding_task(checkout)
+    source = (checkout / "src/example.py").read_text(encoding="utf-8")
+    plan = _grounding_plan("unrelated_symbol_xyz")
+
+    grounded, reason = _ground_operator_selector(
+        task, plan, {"src/example.py": source}
+    )
+
+    assert grounded is None
+    assert reason is not None
+    assert "overlap" in reason
+
+
+def test_ground_operator_selector_leaves_resolving_selector_untouched(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    task = _grounding_task(checkout)
+    source = (checkout / "src/example.py").read_text(encoding="utf-8")
+    plan = _grounding_plan("value + 1")  # resolves exactly once
+
+    grounded, reason = _ground_operator_selector(
+        task, plan, {"src/example.py": source}
+    )
+
+    assert grounded is None
+    assert reason == "no selector required grounding"

@@ -18,7 +18,13 @@ from .mlx_student import (
     _project_numbered_teaching,
     _teaching_reminder,
 )
-from .operator_rewrite import OperatorPlan, _find_definition, materialize_operator_plan
+from .operator_rewrite import (
+    OperatorOperation,
+    OperatorPlan,
+    _OPERATORS,
+    _find_definition,
+    materialize_operator_plan,
+)
 from .capabilities import StudentCapabilityProfile, profile_for
 from .student_adapter import (
     StudentAdapter,
@@ -731,6 +737,122 @@ def _semantic_oracle_mismatch(
     return None
 
 
+_SELECTOR_GROUND_MIN_RATIO = 0.6
+
+
+def _normalized_selector_text(value: str) -> str:
+    """Whitespace-normalize a selector for overlap comparison."""
+    return " ".join(str(value).split())
+
+
+def _selector_overlap(model_source: str, candidate_source: str) -> float:
+    """Normalized SequenceMatcher ratio between two selector texts."""
+    left = _normalized_selector_text(model_source)
+    right = _normalized_selector_text(candidate_source)
+    if not left or not right:
+        return 0.0
+    return difflib.SequenceMatcher(None, left, right).ratio()
+
+
+def _grounded_operator_operation(
+    operation: OperatorOperation,
+    candidate: dict[str, Any],
+) -> OperatorOperation | None:
+    """Rebuild one operation against a candidate's byte-exact source.
+
+    The operator kind follows the candidate's suggested_operator and the
+    arguments are adapted when the kind changes (mirrors A1: an expression
+    field may actually hold a statement).  Returns None when the candidate is
+    incompatible with the model's arguments.
+    """
+    suggested = str(candidate.get("suggested_operator") or operation.operator)
+    operator = suggested if suggested in _OPERATORS else operation.operator
+    arguments = dict(operation.arguments)
+    selector = {
+        "source": str(candidate["source"]),
+        "occurrence": int(candidate.get("occurrence", 0)),
+    }
+    if operator != operation.operator:
+        if operator == "replace_statement" and "new_expression" in arguments:
+            arguments = {"new_statements": str(arguments["new_expression"])}
+        elif operator == "replace_expression" and "new_statements" in arguments:
+            return None  # cannot safely collapse statements into an expression
+    try:
+        grounded = OperatorOperation(
+            operator=operator, selector=selector, arguments=arguments
+        )
+        grounded.validate()
+    except ContractError:
+        return None
+    return grounded
+
+
+def _ground_operator_selector(
+    task: StudentTask,
+    plan: OperatorPlan,
+    context_by_file: dict[str, str],
+) -> tuple[OperatorPlan | None, str | None]:
+    """Deterministically re-point every zero-match selector to the nearest
+    framework-harvested typed candidate in the same file.
+
+    Only selectors whose literal source does not resolve exactly once are
+    re-pointed; correctly-resolving operations are left untouched.  Returns
+    (grounded_plan, None) on success, else (None, reason).
+    """
+    source = task.resolve_target(plan.file).read_text(
+        encoding="utf-8", errors="replace"
+    )
+    candidates = _harvest_typed_selector_candidates(
+        source, instruction=task.instruction, maximum_candidates=128
+    )
+    if not candidates:
+        return None, "no typed selector candidates to ground against"
+    grounded_ops: list[OperatorOperation] = []
+    grounded_any = False
+    for operation in plan.operations:
+        selector_source = operation.selector.get("source")
+        if not isinstance(selector_source, str) or not selector_source.strip():
+            grounded_ops.append(operation)
+            continue
+        if source.count(selector_source) == 1:
+            grounded_ops.append(operation)
+            continue
+        best: dict[str, Any] | None = None
+        best_ratio = 0.0
+        for candidate in candidates:
+            cand_source = str(candidate.get("source", ""))
+            if not cand_source:
+                continue
+            ratio = _selector_overlap(selector_source, cand_source)
+            if ratio > best_ratio:
+                best, best_ratio = candidate, ratio
+        if best is None or best_ratio < _SELECTOR_GROUND_MIN_RATIO:
+            return None, (
+                f"no grounded selector above {_SELECTOR_GROUND_MIN_RATIO} "
+                f"overlap for {selector_source[:60]!r}"
+            )
+        grounded = _grounded_operator_operation(operation, best)
+        if grounded is None:
+            return None, (
+                f"candidate {best.get('candidate_id')} is incompatible with "
+                "operation arguments"
+            )
+        grounded_ops.append(grounded)
+        grounded_any = True
+    if not grounded_any:
+        return None, "no selector required grounding"
+    grounded_plan = OperatorPlan(
+        schema_version=plan.schema_version,
+        file=plan.file,
+        symbol=plan.symbol,
+        intent=plan.intent,
+        operations=tuple(grounded_ops),
+        diagnostic=plan.diagnostic,
+    )
+    grounded_plan.validate()
+    return grounded_plan, None
+
+
 def _correct_boundary_rewrites(task: StudentTask, plan: OperatorPlan) -> None:
     """Deterministically correct a supported boundary rewrite in place.
 
@@ -1270,6 +1392,36 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
                     else "structural-rejected"
                 )
                 trace_results.append({"status": status, "detail": str(exc)})
+                # Deterministic selector grounding: re-point a zero-match
+                # selector to the nearest framework-harvested candidate before
+                # spending a model replan.  Runs for every profile (it does not
+                # consume the repair budget) and is fully replayable.
+                if "selector did not resolve" in str(exc) and plan is not None:
+                    grounded_plan, ground_reason = _ground_operator_selector(
+                        task, plan, context_by_file
+                    )
+                    if grounded_plan is not None:
+                        grounded_source = task.resolve_target(
+                            grounded_plan.file
+                        ).read_text(encoding="utf-8", errors="replace")
+                        grounded_result = materialize_operator_plan(
+                            grounded_source, grounded_plan
+                        )
+                        if grounded_result.accepted:
+                            plan = grounded_plan
+                            raw = canonical_json(grounded_plan.to_dict())
+                            prompt_trace.append("")
+                            trace.append(raw)
+                            trace_kinds.append(
+                                f"operator-selector-grounded-{repair_index}"
+                            )
+                            trace_results.append(
+                                {
+                                    "status": "selector-grounded",
+                                    "detail": "nearest framework candidate",
+                                }
+                            )
+                            break
                 if (
                     repair_index >= self.max_plan_repairs
                     or not _operator_failure_is_repairable(exc)
