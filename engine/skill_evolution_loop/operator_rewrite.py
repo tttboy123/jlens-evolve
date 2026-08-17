@@ -82,11 +82,23 @@ class OperatorOperation:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OperatorOperation:
-        if not isinstance(data, dict) or set(data) != {
-            "operator",
-            "selector",
-            "arguments",
-        }:
+        if not isinstance(data, dict):
+            raise ContractError("operator operation fields are invalid")
+        # Normalize the alternative 7B-style shape
+        # {"<operator>": {"selector": ..., "arguments": ...}} into the canonical
+        # {"operator": ..., "selector": ..., "arguments": ...} shape.  Only the
+        # exact single-key operator-as-key form is accepted; anything else still
+        # fails the strict field check below.
+        if (
+            len(data) == 1
+            and next(iter(data)) in _OPERATORS
+            and isinstance(next(iter(data.values())), dict)
+        ):
+            operator_name = next(iter(data))
+            payload = data[operator_name]
+            if set(payload) == {"selector", "arguments"}:
+                data = {"operator": operator_name, **payload}
+        if set(data) != {"operator", "selector", "arguments"}:
             raise ContractError("operator operation fields are invalid")
         arguments = dict(data["arguments"])
         if data["operator"] == "replace_statement" and isinstance(

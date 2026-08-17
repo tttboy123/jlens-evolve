@@ -535,3 +535,39 @@ def test_replace_expression_on_statement_noop_still_rejected() -> None:
 
     assert result.accepted is False
     assert result.failure_reason in {"no-op", "apply-fail"}
+
+
+def test_operator_operation_normalizes_operator_as_key_shape() -> None:
+    """7B-style {"<operator>": {"selector","arguments"}} maps to the contract shape."""
+    from skill_evolution_loop.operator_rewrite import OperatorOperation
+
+    op = OperatorOperation.from_dict(
+        {
+            "replace_expression": {
+                "selector": {"source": "value + 1", "occurrence": 0},
+                "arguments": {"new_expression": "value + 2"},
+            }
+        }
+    )
+    assert op.operator == "replace_expression"
+    assert op.selector == {"source": "value + 1", "occurrence": 0}
+    assert op.arguments == {"new_expression": "value + 2"}
+
+
+def test_operator_operation_rejects_non_operator_as_key_shape() -> None:
+    from skill_evolution_loop.contracts import ContractError
+    from skill_evolution_loop.operator_rewrite import OperatorOperation
+
+    try:
+        OperatorOperation.from_dict(
+            {
+                "not_an_operator": {
+                    "selector": {"source": "x", "occurrence": 0},
+                    "arguments": {"new_expression": "y"},
+                }
+            }
+        )
+    except ContractError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("unknown operator-as-key must be rejected")
