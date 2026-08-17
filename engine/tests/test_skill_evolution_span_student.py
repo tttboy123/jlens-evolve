@@ -2619,3 +2619,36 @@ def test_span_adapter_plan_too_large_uses_profile_bundle_chars(
     assert attempt.structural_valid is False
     assert attempt.failure_reason == "plan-too-large"
     assert "100 characters" in attempt.detail
+
+
+def test_semantic_recipe_after_gate_follows_profile_recipe_chars(
+    tmp_path: Path,
+) -> None:
+    """P0-1: recipe after-limit comes from the profile, not a hard 600."""
+    checkout = _checkout(tmp_path / "repo")
+    task = _task(checkout)
+    revision = _revision(True, source_round=70)
+    candidates = _frozen_causal_candidates(task, revision)
+    assert candidates
+    candidate = candidates[0]
+    long_after = "x" * 700  # > default 600, < profile 800
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "recipes": [
+                {"candidate_id": candidate.candidate_id, "after": long_after}
+            ],
+        }
+    )
+    projected, changed = _canonicalize_semantic_recipe_output(
+        raw, candidates, task=task
+    )
+    assert changed is False  # default 600 rejects a 700-char after
+    projected, changed = _canonicalize_semantic_recipe_output(
+        raw,
+        candidates,
+        task=task,
+        recipe_output_chars=800,
+    )
+    assert changed is True  # profile 800 accepts it
+    assert "x" * 700 in projected

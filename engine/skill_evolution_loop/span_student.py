@@ -1815,6 +1815,7 @@ def _canonicalize_semantic_recipe_output(
     candidates: tuple[ExactSpanCandidate, ...],
     *,
     task: StudentTask | None = None,
+    recipe_output_chars: int = _MAX_EXACT_SPAN_CHARS,
 ) -> tuple[str, bool]:
     """Project small-model candidate recipes into renderer-owned exact edits."""
 
@@ -1862,7 +1863,7 @@ def _canonicalize_semantic_recipe_output(
             or candidate_id in selected
             or not isinstance(after, str)
             or not after.strip()
-            or len(after) > _MAX_EXACT_SPAN_CHARS
+            or len(after) > recipe_output_chars
             or len(after.splitlines()) > _MAX_EXACT_SPAN_LINES
         ):
             return raw, False
@@ -2334,7 +2335,14 @@ class SpanPlanAdapter(StudentAdapter):
             typed_catalog = fixed_typed_actions(task, typed_candidates)
             if revision.source_round >= 70 and not typed_catalog:
                 projected, changed = _canonicalize_semantic_recipe_output(
-                    raw, typed_candidates, task=task
+                    raw,
+                    typed_candidates,
+                    task=task,
+                    recipe_output_chars=getattr(
+                        getattr(self.generator, "profile", None),
+                        "recipe_output_chars",
+                        _MAX_EXACT_SPAN_CHARS,
+                    ),
                 )
                 if changed:
                     raw = projected
@@ -2749,7 +2757,10 @@ class MlxSpanPlanGenerator(MlxStructuredGenerator):
                 if recipe_schema:
                     canonical_raw, recipe_changed = (
                         _canonicalize_semantic_recipe_output(
-                            generated_raw, candidates, task=task
+                            generated_raw,
+                            candidates,
+                            task=task,
+                            recipe_output_chars=self.profile.recipe_output_chars,
                         )
                     )
                     if not recipe_changed:
