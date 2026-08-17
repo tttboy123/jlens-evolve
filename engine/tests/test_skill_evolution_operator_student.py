@@ -25,6 +25,8 @@ from skill_evolution_loop.capabilities import StudentCapabilityProfile
 from skill_evolution_loop.operator_student import (
     MlxOperatorPlanGenerator,
     OperatorPlanAdapter,
+    _correct_error_params_rewrites,
+    _error_message_value_expression,
     _grounded_repair_detail,
     _ground_operator_selector,
 )
@@ -553,3 +555,167 @@ def test_plan_usage_exemplars_harvests_from_rejected_plan(tmp_path: Path) -> Non
     )
     exemplars = _plan_usage_exemplars(task, plan)
     assert "params" in exemplars
+
+
+def test_call_names_in_source_falls_back_on_truncated_source() -> None:
+    """Truncated excerpts (unclosed statements) still yield call names."""
+    from skill_evolution_loop.operator_student import _call_names_in_source
+
+    truncated = (
+        "def to_python(self, value):\n"
+        "    try:\n"
+        "        value = self.queryset.get(**{key: value})\n"
+        "    except (ValueError, TypeError):\n"
+        "        raise ValidationError(self.error_messages['invalid_choice'], code='invalid_choice')\n"
+        "    return val"  # cut mid-statement -> SyntaxError on ast.parse
+    )
+    names = _call_names_in_source(truncated)
+    assert "ValidationError" in names
+    assert "get" in names
+
+
+def test_usage_exemplars_block_prioritizes_issue_call_family(
+    tmp_path: Path,
+) -> None:
+    """The issue-derived call family (ValidationError) wins over generic names."""
+    from skill_evolution_loop.operator_student import _usage_exemplars_block
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    module = repo / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "def validate(self, value):\n"
+        "    raise ValidationError('x')\n"
+        "\n"
+        "def other(self, pk):\n"
+        "    raise ValidationError(\n"
+        "        self.error_messages['invalid_pk_value'],\n"
+        "        code='invalid_pk_value',\n"
+        "        params={'pk': pk},\n"
+        "    )\n",
+        encoding="utf-8",
+    )
+    sources = {"src/example.py": module.read_text(encoding="utf-8")}
+    contexts = (("src/example.py", "def validate(self, value):\n    raise Validation", 1),)
+    block = _usage_exemplars_block(
+        sources,
+        contexts,
+        instruction="ValidationError does not provide the invalid value",
+        per_file_candidates={},
+    )
+    assert "ValidationError" in block
+    assert "params=" in block
+
+
+# --------------------------------------------------------------------------
+# Deterministic error-message params= correction (solution-1 extension)
+# --------------------------------------------------------------------------
+
+
+def test_error_message_value_expression_extracts_format_kwarg() -> None:
+    assert (
+        _error_message_value_expression(
+            "self.error_messages['invalid_choice'].format(value=value)"
+        )
+        == "value"
+    )
+
+
+def test_error_message_value_expression_extracts_percent_operand() -> None:
+    assert _error_message_value_expression("self.error_messages['x'] % value") == "value"
+    assert _error_message_value_expression("self.error_messages['x']") is None
+
+
+def _error_params_task(checkout: Path, *, with_sibling: bool) -> StudentTask:
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    body = (
+        "class ChoiceField:\n"
+        "    error_messages = {'invalid': 'invalid'}\n"
+        "    def validate(self, value):\n"
+        "        raise ValidationError(self.error_messages['invalid'], code='invalid')\n"
+        "\n"
+        "class ModelChoiceField:\n"
+        "    error_messages = {'invalid_choice': 'invalid choice'}\n"
+        "    def to_python(self, value):\n"
+        "        raise ValidationError(self.error_messages['invalid_choice'], code='invalid_choice')\n"
+        "        return value\n"
+    )
+    if with_sibling:
+        body += (
+            "\n"
+            "class ModelMultipleChoiceField:\n"
+            "    error_messages = {'invalid_pk_value': 'invalid pk'}\n"
+            "    def to_python(self, pk):\n"
+            "        raise ValidationError(self.error_messages['invalid_pk_value'], code='invalid_pk_value', params={'pk': pk})\n"
+        )
+    module.write_text(body, encoding="utf-8")
+    _git_init(checkout)
+    return StudentTask.create(
+        task_id="errparams-fixture",
+        checkout=checkout,
+        instruction="Pass the invalid value to the error.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+
+
+def _error_params_plan() -> OperatorPlan:
+    return OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "ModelChoiceField",
+            "intent": {
+                "defect": "error lacks the value",
+                "trigger": "invalid choice",
+                "desired_boundary": "error carries the value",
+            },
+            "operations": [
+                {
+                    "operator": "replace_expression",
+                    "selector": {
+                        "source": "self.error_messages['invalid_choice']",
+                        "occurrence": 0,
+                    },
+                    "arguments": {
+                        "new_expression": "self.error_messages['invalid_choice'].format(value=value)"
+                    },
+                }
+            ],
+            "diagnostic": "pass the invalid value",
+        }
+    )
+
+
+def test_correct_error_params_rewrites_fixes_near_miss(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    task = _error_params_task(checkout, with_sibling=True)
+    plan = _error_params_plan()
+
+    corrected = _correct_error_params_rewrites(task, plan)
+
+    assert corrected is not plan
+    op = corrected.operations[0]
+    assert op.operator == "replace_statement"
+    assert "params={'value': value}" in op.arguments["new_statements"]
+    result = materialize_operator_plan(
+        (checkout / "src/example.py").read_text(encoding="utf-8"), corrected
+    )
+    assert result.accepted is True
+    assert "params={'value': value}" in result.after
+
+
+def test_correct_error_params_rewrites_unchanged_without_sibling(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    task = _error_params_task(checkout, with_sibling=False)
+    plan = _error_params_plan()
+
+    corrected = _correct_error_params_rewrites(task, plan)
+
+    assert corrected is plan

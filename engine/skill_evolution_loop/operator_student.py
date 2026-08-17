@@ -44,6 +44,8 @@ _OPERATOR_PROMPT_TEMPLATE = "Return exactly one typed operator plan JSON object.
 _OPERATOR_CONTEXT_SELECTOR = "frozen-top32-qualified-absolute-overlap-symbol-v6"
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _MAX_OPERATOR_PLAN_CHARS = 1_500
+_CALL_NAME_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+_CAMEL_CASE_RE = re.compile(r"\b[A-Z][A-Za-z0-9_]*\b")
 _OPERATOR_CATALOG = """Allowed operators (use one to four):
 - replace_condition: selector {"source": <exact if/elif/while predicate expression without keyword or colon>, "occurrence": <0-based int>}; arguments {"new_condition": <Python expression without keyword or colon>}
 - replace_expression: selector {"source": <exact Python expression>, "occurrence": <0-based int>}; arguments {"new_expression": <Python expression>}
@@ -853,6 +855,187 @@ def _ground_operator_selector(
     return grounded_plan, None
 
 
+def _error_message_value_expression(replacement: str) -> str | None:
+    """Extract the value a model tried to inject into an error message via
+    string formatting, e.g. ``.format(value=value)`` -> ``value`` or ``% value``
+    -> ``value``.  Returns the expression source or None."""
+    try:
+        tree = ast.parse(replacement, mode="eval")
+    except SyntaxError:
+        return None
+    node = tree.body
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+        if node.func.attr == "format":
+            if node.keywords:
+                return ast.unparse(node.keywords[0].value)
+            if node.args:
+                return ast.unparse(node.args[0])
+            return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return ast.unparse(node.right)
+    return None
+
+
+def _has_error_message_access(replacement: str) -> bool:
+    return "error_messages" in replacement or "message" in replacement.casefold()
+
+
+def _file_has_params_validation_error(source: str) -> bool:
+    """True when the file already uses the repo idiom raise ValidationError(..., params=...)."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            call = node.exc
+            if _call_name(call) == "ValidationError" and any(
+                kw.arg == "params" for kw in call.keywords
+            ):
+                return True
+    return False
+
+
+def _raise_statement_for_selector(
+    source: str, selector_source: str, symbol: str, occurrence: int
+) -> tuple[str, int] | None:
+    """Find the ``raise ValidationError(...)`` statement (without params=) that
+    contains the selector text, scoped to the plan's symbol where possible.
+    Returns the statement source or None."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    needle = selector_source.strip()
+    scope: ast.AST = tree
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == symbol
+        ):
+            scope = node
+            break
+    matches: list[tuple[int, str]] = []
+    for node in ast.walk(scope):
+        if not isinstance(node, ast.Raise) or not isinstance(node.exc, ast.Call):
+            continue
+        call = node.exc
+        if _call_name(call) != "ValidationError":
+            continue
+        if any(kw.arg == "params" for kw in call.keywords):
+            continue  # already idiomatic; not the near-miss target
+        stmt_text = ast.get_source_segment(source, node)
+        call_text = ast.get_source_segment(source, call)
+        if stmt_text and call_text and needle in call_text:
+            matches.append((node.lineno or 0, stmt_text))
+    if not matches:
+        return None
+    unique: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for lineno, text in matches:
+        if text not in seen:
+            seen.add(text)
+            unique.append((lineno, text))
+    if occurrence < len(unique):
+        return unique[occurrence][1]
+    return unique[0][1]
+
+
+def _augment_validation_error_params(raise_stmt_source: str, value_expr: str) -> str:
+    """Append ``params={'value': <expr>}`` to a ValidationError call in a raise
+    statement, returning the new statement source (or the original when the
+    call already carries params=)."""
+    try:
+        tree = ast.parse(raise_stmt_source)
+    except SyntaxError:
+        return raise_stmt_source
+    stmt = tree.body[0]
+    if not isinstance(stmt, ast.Raise) or not isinstance(stmt.exc, ast.Call):
+        return raise_stmt_source
+    call = stmt.exc
+    if any(kw.arg == "params" for kw in call.keywords):
+        return raise_stmt_source
+    params_value = ast.parse(f"{{'value': {value_expr}}}", mode="eval").body
+    call.keywords.append(ast.keyword(arg="params", value=params_value))
+    ast.fix_missing_locations(stmt)
+    return ast.unparse(stmt)
+
+
+def _correct_error_params_rewrites(
+    task: StudentTask, plan: OperatorPlan
+) -> OperatorPlan:
+    """Deterministically repair the error-message near-miss.
+
+    When the Student tries to inject a value into an error message via string
+    formatting (``.format(...)`` / ``%``) but the repo already uses
+    ``raise ValidationError(..., params={...})``, rewrite the operation to the
+    repo idiom: replace the whole raise statement and add
+    ``params={'value': <extracted expr>}``.  Conservative: fires only when all
+    of (message access, extractable value, sibling params= call, matching
+    raise-without-params) hold; otherwise the plan is returned unchanged.
+    """
+    try:
+        source = task.resolve_target(plan.file).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except (ContractError, OSError, UnicodeError):
+        return plan
+    if not _file_has_params_validation_error(source):
+        return plan
+    corrected_ops: list[OperatorOperation] = []
+    changed = False
+    for operation in plan.operations:
+        replacement = ""
+        if operation.operator == "replace_expression":
+            replacement = str(operation.arguments.get("new_expression", ""))
+        elif operation.operator == "replace_statement":
+            replacement = str(operation.arguments.get("new_statements", ""))
+        value_expr = _error_message_value_expression(replacement)
+        if (
+            not replacement
+            or not _has_error_message_access(replacement)
+            or value_expr is None
+        ):
+            corrected_ops.append(operation)
+            continue
+        selector = str(operation.selector.get("source", ""))
+        occurrence = int(operation.selector.get("occurrence", 0))
+        raise_stmt = _raise_statement_for_selector(
+            source, selector, plan.symbol, occurrence
+        )
+        if raise_stmt is None:
+            corrected_ops.append(operation)
+            continue
+        augmented = _augment_validation_error_params(raise_stmt, value_expr)
+        if augmented == raise_stmt:
+            corrected_ops.append(operation)
+            continue
+        try:
+            corrected = OperatorOperation(
+                operator="replace_statement",
+                selector={"source": raise_stmt, "occurrence": occurrence},
+                arguments={"new_statements": augmented},
+            )
+            corrected.validate()
+        except ContractError:
+            corrected_ops.append(operation)
+            continue
+        corrected_ops.append(corrected)
+        changed = True
+    if not changed:
+        return plan
+    corrected_plan = OperatorPlan(
+        schema_version=plan.schema_version,
+        file=plan.file,
+        symbol=plan.symbol,
+        intent=plan.intent,
+        operations=tuple(corrected_ops),
+        diagnostic=plan.diagnostic,
+    )
+    corrected_plan.validate()
+    return corrected_plan
+
+
 def _correct_boundary_rewrites(task: StudentTask, plan: OperatorPlan) -> None:
     """Deterministically correct a supported boundary rewrite in place.
 
@@ -952,6 +1135,7 @@ class OperatorPlanAdapter(StudentAdapter):
                 reason = "malformed-hunk"
             return self._failure(task, revision, raw, reason, str(exc))
         _correct_boundary_rewrites(task, plan)
+        plan = _correct_error_params_rewrites(task, plan)
         if revision.source_round >= 19 and re.search(
             r"\bunresolved\b", plan.diagnostic, re.IGNORECASE
         ):
@@ -1116,7 +1300,16 @@ def _call_names_in_source(source: str) -> tuple[str, ...]:
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return ()
+        return tuple(
+            dict.fromkeys(
+                name
+                for name in _CALL_NAME_RE.findall(source)
+                if name
+                not in {
+                    "if", "for", "while", "return", "with", "def", "class", "raise",
+                }
+            )
+        )
     names: list[str] = []
     seen: set[str] = set()
     for node in ast.walk(tree):
@@ -1178,8 +1371,9 @@ def _usage_exemplars_block(
     sources: dict[str, str],
     contexts: tuple[tuple[str, str, int], ...],
     *,
+    instruction: str = "",
     per_file_candidates: Mapping[str, list[dict[str, Any]]] | None = None,
-    max_calls: int = 3,
+    max_calls: int = 4,
     max_exemplars_per_call: int = 2,
     max_total_chars: int = 700,
 ) -> str:
@@ -1206,6 +1400,12 @@ def _usage_exemplars_block(
                 seen.add(name.casefold())
                 call_names.append(name)
 
+        # Issue-derived call families (e.g. ValidationError in the bug report)
+        # are the highest-value exemplars and must not be crowded out by
+        # generic excerpt call names.
+        for name in _CAMEL_CASE_RE.findall(instruction):
+            if name in full_source:
+                add_call_name(name)
         for row in candidates.get(relative, ()):
             for name in _call_names_in_source(str(row.get("source", ""))):
                 add_call_name(name)
@@ -1482,13 +1682,19 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
             )
         )
         rendered_exemplars = _usage_exemplars_block(
-            sources, contexts, per_file_candidates=per_file_candidates
+            sources,
+            contexts,
+            instruction=task.instruction,
+            per_file_candidates=per_file_candidates,
         )
         exemplar_section = (
             "\n\n"
-            "Repository usage exemplars (read-only reference - how these calls "
-            "are made elsewhere in the repo; prefer their idiom when writing "
-            f"replacements):\n{rendered_exemplars}"
+            "Repository usage exemplars - how these calls are made elsewhere in "
+            "this repo (read-only reference; never copy as a selector). "
+            "Follow the SAME calling convention: when a sibling call passes "
+            "values via keyword arguments (e.g. params=...), do the same in "
+            "your replacement instead of string formatting or message mutation. "
+            f"Exemplars:\n{rendered_exemplars}"
             if rendered_exemplars
             else ""
         )
@@ -1576,6 +1782,7 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
                 if plan.file not in allowed_files:
                     raise ContractError("operator plan changed the frozen candidates")
                 _correct_boundary_rewrites(task, plan)
+                plan = _correct_error_params_rewrites(task, plan)
                 if revision.source_round >= 23:
                     oracle_mismatch = _semantic_oracle_mismatch(task, plan)
                     if oracle_mismatch is not None:
