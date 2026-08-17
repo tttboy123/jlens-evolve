@@ -469,6 +469,17 @@ class LegacyQwenCellRunner:
                 "parent_harness_prompt": None,
                 "parent_harness_prompt_sha256": None,
             }
+        if plan.task.task_id not in dict(parent.router.routes):
+            # The parent harness (previous best candidate) routed only its own
+            # round's tasks.  A later round selects different tasks, so there is
+            # no parent prompt to bind for this task; fail soft instead of
+            # crashing the whole round on a cross-round router gap.
+            return {
+                "parent_harness_revision_id": None,
+                "parent_harness_bundle_sha256": None,
+                "parent_harness_prompt": None,
+                "parent_harness_prompt_sha256": None,
+            }
         prompt = compiled_candidate_prompt(parent, plan.task.task_id)
         return {
             "parent_harness_revision_id": parent.change_set.revision_id,

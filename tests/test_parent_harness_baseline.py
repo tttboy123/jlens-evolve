@@ -217,3 +217,40 @@ def test_round_zero_empty_parent_lineage_remains_supported() -> None:
     assert pair.parent_harness_revision_id is None
     assert pair.parent_harness_bundle_sha256 is None
     assert pair.parent_harness_prompt_sha256 is None
+
+
+def test_parent_harness_lineage_fails_soft_when_router_has_no_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a previous-best candidate routes only its own round's tasks;
+    a later round with different tasks must not crash the baseline lineage."""
+    from evolve.runtime.qwen_transport import LegacyQwenCellRunner
+
+    parent_root = tmp_path / "parent"
+    proposed_root = tmp_path / "proposed"
+    parent = _compiled(parent_root, "Use the current best harness.")
+    parent = replace(
+        parent,
+        change_set=replace(
+            parent.change_set,
+            revision_id="parent-r1",
+            parent_revision_id="empty-harness-v1",
+        ),
+        skill=replace(parent.skill, revision_id="parent-r1"),
+        operator=replace(parent.operator, revision_id="parent-r1"),
+        router=replace(parent.router, revision_id="parent-r1"),
+    )
+    monkeypatch.setattr("evolve.runtime.qwen_transport.CompiledRevision.load", lambda _r: parent)
+    runner = _runner(tmp_path, proposed=proposed_root, parent=parent_root)
+
+    plan = replace(
+        _plan(arm="taught"),
+        task=replace(
+            _plan().task,
+            task_id="scikit-learn__scikit-learn-13439",  # NOT in parent router
+        ),
+    )
+    lineage = runner._parent_harness_lineage(plan, compiled=None)
+    assert lineage["parent_harness_revision_id"] is None
+    assert lineage["parent_harness_prompt"] is None
+    assert lineage["parent_harness_prompt_sha256"] is None
