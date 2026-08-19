@@ -634,3 +634,25 @@ def test_operator_operation_drops_redundant_suggested_operator() -> None:
         }
     )
     assert op.operator == "replace_expression"
+
+
+def test_replace_method_body_normalizes_list_new_body() -> None:
+    """new_body as a list of statements joins into a string (django-15277 7B shape)."""
+    from skill_evolution_loop.operator_rewrite import OperatorOperation
+
+    op = OperatorOperation.from_dict(
+        {
+            "operator": "replace_method_body",
+            "selector": {"occurrence": 0},
+            "arguments": {
+                "new_body": [
+                    "if self.max_length is not None:",
+                    "    self.validators.append(validators.MaxLengthValidator(self.max_length))",
+                ]
+            },
+        }
+    )
+    assert op.arguments["new_body"] == (
+        "if self.max_length is not None:\n"
+        "    self.validators.append(validators.MaxLengthValidator(self.max_length))"
+    )

@@ -21,6 +21,7 @@ from .mlx_student import (
 )
 from .span_rewrite import (
     SpanBundlePlan,
+    SpanOperation,
     SpanPlan,
     materialize_span_bundle,
 )
@@ -2135,6 +2136,183 @@ _DECLARED_SYMBOL = re.compile(
 )
 
 
+_PREG_TRIM_RE = re.compile(
+    r"return preg_replace\('~(?P<regex>[^']+)~u', '', \$value\) \?\? "
+    r"(?P<method>trim|ltrim|rtrim)\(\$value\);"
+)
+_CHAR_CLASS = re.compile(r"\[([^\]]+)\]")
+_CLASS_TOKEN = re.compile(
+    r"\\x\{[0-9A-Fa-f]+\}|\\x[0-9A-Fa-f]{2}|\\[a-zA-Z0-9]"
+)
+_ALLOWED_CLASS_TOKENS = frozenset(
+    {
+        "\\x00", "\\x{FEFF}", "\\x{200B}", "\\x{200E}", "\\x{200F}",
+        "\\v", "\\t", "\\r", "\\n", "\\s", " ",
+    }
+)
+
+
+def _class_tokens(value: str) -> list[str]:
+    """Split a char-class body into escape tokens and single characters."""
+    tokens: list[str] = []
+    index = 0
+    for match in _CLASS_TOKEN.finditer(value):
+        if match.start() > index:
+            tokens.extend(value[index : match.start()])
+        tokens.append(match.group(0))
+        index = match.end()
+    if index < len(value):
+        tokens.extend(value[index:])
+    return tokens
+
+
+def _char_class_delta(regex_before: str, regex_after: str) -> tuple[str, ...] | None:
+    """Return escape tokens added to any char class, or None if the diff is not
+    purely char-class additions (e.g. control flow / expression changes)."""
+    classes_before = _CHAR_CLASS.findall(regex_before)
+    classes_after = _CHAR_CLASS.findall(regex_after)
+    if len(classes_before) != len(classes_after):
+        return None
+    added: list[str] = []
+    for before, after in zip(classes_before, classes_after):
+        tokens_before = set(_class_tokens(before))
+        tokens_after = _class_tokens(after)
+        removed = [token for token in tokens_before if token not in set(tokens_after)]
+        appended = [
+            token
+            for token in tokens_after
+            if token not in tokens_before
+        ]
+        # any removal (or a non-whitespace/escape addition) fails the gate
+        if removed:
+            return None
+        if any(token not in _ALLOWED_CLASS_TOKENS for token in appended):
+            return None
+        added.extend(appended)
+    if not added:
+        return None
+    return tuple(dict.fromkeys(added))
+
+
+def _diffuse_trim_family_edits(
+    task: StudentTask, bundle: SpanBundlePlan
+) -> SpanBundlePlan | None:
+    """A2-class: spread a trim-family char-class addition to all anchors.
+
+    When the Student edits ``trim()`` (or ltrim/rtrim) by adding an escape to a
+    regex char class but leaves the sibling methods / anchors untouched, add the
+    same addition to every family anchor: trim's leading+trailing classes,
+    ltrim's leading class, rtrim's trailing class.  Only fires when the edit is
+    a pure char-class addition and the sibling ``$charlist === null`` branches
+    exist verbatim; otherwise the bundle is returned unchanged.
+    """
+    if len(bundle.plans) != 1:
+        return None
+    plan = bundle.plans[0]
+    try:
+        source = task.resolve_target(plan.file).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except (ContractError, OSError, UnicodeError):
+        return None
+    delta: tuple[str, ...] | None = None
+    edited_lines: set[str] = set()
+    for operation in plan.operations:
+        match_before = _PREG_TRIM_RE.search(operation.before)
+        match_after = _PREG_TRIM_RE.search(operation.after)
+        if match_before is None or match_after is None:
+            continue
+        if match_before.group("method") != match_after.group("method"):
+            return None
+        current_delta = _char_class_delta(
+            match_before.group("regex"), match_after.group("regex")
+        )
+        if current_delta is None:
+            return None
+        if delta is None:
+            delta = current_delta
+        elif delta != current_delta:
+            return None
+        edited_lines.add(operation.before.strip())
+    if delta is None or not edited_lines:
+        return None
+    additions = "".join(delta)
+    new_operations = list(plan.operations)
+    new_before_ops: list[SpanOperation] = []
+    lines = source.splitlines()
+    for index, line in enumerate(lines):
+        match = _PREG_TRIM_RE.search(line)
+        if match is None:
+            continue
+        if line.strip() in edited_lines:
+            continue
+        regex = match.group("regex")
+        method = match.group("method")
+        # find the anchor class(es) and append the addition
+        updated = _append_to_anchor_classes(regex, method, additions)
+        if updated is None or updated == regex:
+            continue
+        new_line = line.replace(regex, updated)
+        if new_line == line or source.count(line) != 1:
+            continue
+        new_before_ops.append(
+            SpanOperation(before=line, after=new_line)
+        )
+    if not new_before_ops:
+        return None
+    new_operations.extend(new_before_ops)
+    if len(new_operations) > 4:
+        return None
+    diffused = SpanBundlePlan(
+        schema_version=bundle.schema_version,
+        plans=(
+            SpanPlan(
+                schema_version=plan.schema_version,
+                file=plan.file,
+                intent=plan.intent,
+                operations=tuple(new_operations),
+                diagnostic=plan.diagnostic,
+            ),
+        ),
+        diagnostic=bundle.diagnostic,
+    )
+    diffused.validate()
+    return diffused
+
+
+def _append_to_anchor_classes(
+    regex: str, method: str, additions: str
+) -> str | None:
+    """Append additions to the anchor char classes of a trim-family regex.
+
+    trim: leading ``^[...]+`` and trailing ``[...]+$``; ltrim: leading only;
+    rtrim: trailing only.  Returns None if the shape is unexpected.
+    """
+    classes = list(_CHAR_CLASS.finditer(regex))
+    if not classes:
+        return None
+    pieces = list(_CHAR_CLASS.split(regex))
+    updated: list[str] = []
+    class_index = 0
+    if method == "trim" and len(classes) == 2:
+        # both anchors
+        for part in pieces:
+            if _CHAR_CLASS.fullmatch(part):
+                target = (
+                    class_index == 0 or class_index == 1
+                )
+                updated.append(part[:-1] + additions + "]" if target else part)
+                class_index += 1
+            else:
+                updated.append(part)
+        return "".join(updated)
+    if method == "ltrim" and len(classes) == 1 and "^" in regex:
+        return regex.replace(classes[0].group(0), classes[0].group(0)[:-1] + additions + "]")
+    if method == "rtrim" and len(classes) == 1 and "$" in regex:
+        return regex.replace(classes[0].group(0), classes[0].group(0)[:-1] + additions + "]")
+    return None
+
+
 def _non_executable_insertion_reason(
     bundle: SpanBundlePlan, instruction: str
 ) -> str | None:
@@ -2164,6 +2342,29 @@ def _non_executable_insertion_reason(
             }
             if not declared.intersection(issue_symbols):
                 return "non-executable-insertion"
+    return None
+
+
+_PHP_LINE_COMMENT = re.compile(r"//.*?$|#.*?$", re.MULTILINE)
+_PHP_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _strip_php_comments(text: str) -> str:
+    """Remove PHP line/block comments and collapse whitespace."""
+    without_block = _PHP_BLOCK_COMMENT.sub(" ", text)
+    without_line = _PHP_LINE_COMMENT.sub("", without_block)
+    return " ".join(without_line.split())
+
+
+def _semantic_noop_reason(bundle: SpanBundlePlan) -> str | None:
+    """Reject span edits that change nothing after comments/whitespace are
+    stripped (e.g. appending '// comment' to a line the model meant to edit)."""
+    for plan in bundle.plans:
+        for operation in plan.operations:
+            before = _strip_php_comments(operation.before)
+            after = _strip_php_comments(operation.after)
+            if before == after:
+                return "semantic-noop"
     return None
 
 
@@ -2410,6 +2611,9 @@ class SpanPlanAdapter(StudentAdapter):
             reason = _non_executable_insertion_reason(bundle, task.instruction)
             if reason is not None:
                 return self._failure(task, revision, raw, reason, reason)
+            reason = _semantic_noop_reason(bundle)
+            if reason is not None:
+                return self._failure(task, revision, raw, reason, reason)
         if revision.source_round >= 34:
             reason = _flag_state_overwrite_reason(bundle, task.instruction)
             if reason is not None:
@@ -2426,6 +2630,9 @@ class SpanPlanAdapter(StudentAdapter):
                     f"target is not allowed: {file}",
                     target_file=file,
                 )
+        diffused = _diffuse_trim_family_edits(task, bundle)
+        if diffused is not None:
+            bundle = diffused
         try:
             sources = {
                 file: task.resolve_target(file).read_text(encoding="utf-8")

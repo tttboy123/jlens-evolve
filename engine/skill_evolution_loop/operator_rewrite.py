@@ -159,6 +159,15 @@ class OperatorOperation:
             ):
                 raise ContractError("replacement statement list is invalid")
             arguments["new_statements"] = "\n".join(statements)
+        if data["operator"] == "replace_method_body" and isinstance(
+            arguments.get("new_body"), list
+        ):
+            body = arguments["new_body"]
+            if not 1 <= len(body) <= 8 or any(
+                not isinstance(row, str) for row in body
+            ):
+                raise ContractError("replacement method body list is invalid")
+            arguments["new_body"] = "\n".join(body)
         operation = cls(
             operator=str(data["operator"]),
             selector=dict(data["selector"]),

@@ -22,6 +22,7 @@ from .operator_rewrite import (
     OperatorOperation,
     OperatorPlan,
     _OPERATORS,
+    _ast_dump,
     _find_definition,
     materialize_operator_plan,
 )
@@ -1036,6 +1037,131 @@ def _correct_error_params_rewrites(
     return corrected_plan
 
 
+def _single_if_guard(
+    new_body: str,
+) -> tuple[ast.If, ast.stmt] | None:
+    """Return (if_node, inner_stmt) when new_body is exactly one if with one
+    non-empty body statement and no else/elif branch."""
+    try:
+        statements = ast.parse(str(new_body)).body
+    except SyntaxError:
+        return None
+    if len(statements) != 1 or not isinstance(statements[0], ast.If):
+        return None
+    if_node = statements[0]
+    if if_node.orelse or len(if_node.body) != 1:
+        return None
+    return if_node, if_node.body[0]
+
+
+def _methods_containing_statement(
+    cls: ast.ClassDef, inner_stmt: ast.stmt
+) -> list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, int]]:
+    """Direct-body statements of each method matching the inner statement."""
+    dump = _ast_dump(inner_stmt)
+    matches: list[tuple[ast.FunctionDef | ast.AsyncFunctionDef, int]] = []
+    for node in cls.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for index, stmt in enumerate(node.body):
+            if _ast_dump(stmt) == dump:
+                matches.append((node, index))
+    return matches
+
+
+def _correct_method_body_guards(
+    task: StudentTask, plan: OperatorPlan
+) -> OperatorPlan:
+    """Deterministic guard-wrap correction (A1-class).
+
+    When the Student writes a ``replace_method_body`` whose symbol resolves to
+    a class (not a method) and whose ``new_body`` is a single if-guard wrapping
+    one statement that already exists verbatim inside exactly one method of
+    that class, rewrite the operation to ``replace_statement`` on that
+    statement with the if-guard — the minimal correct edit (mirrors the gold
+    fix for django-15277).  Fail-closed: any ambiguity keeps the operation.
+    """
+    try:
+        source = task.resolve_target(plan.file).read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except (ContractError, OSError, UnicodeError):
+        return plan
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return plan
+    corrected_ops: list[OperatorOperation] = []
+    changed = False
+    for operation in plan.operations:
+        if operation.operator != "replace_method_body":
+            corrected_ops.append(operation)
+            continue
+        guard = _single_if_guard(str(operation.arguments.get("new_body", "")))
+        if guard is None:
+            corrected_ops.append(operation)
+            continue
+        if_node, inner_stmt = guard
+        cls = _find_definition(tree.body, plan.symbol.split("."))
+        if not isinstance(cls, ast.ClassDef):
+            corrected_ops.append(operation)
+            continue
+        matches = _methods_containing_statement(cls, inner_stmt)
+        if len(matches) != 1:
+            corrected_ops.append(operation)
+            continue
+        method, statement_index = matches[0]
+        inner_source = ast.get_source_segment(source, method.body[statement_index])
+        if not inner_source or not inner_source.strip():
+            corrected_ops.append(operation)
+            continue
+        occurrence = sum(
+            1
+            for other in cls.body
+            if isinstance(other, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for stmt in other.body[:statement_index]
+            if _ast_dump(stmt) == _ast_dump(inner_stmt)
+        )
+        try:
+            corrected = OperatorOperation(
+                operator="replace_statement",
+                selector={"source": inner_source, "occurrence": occurrence},
+                arguments={"new_statements": ast.unparse(if_node)},
+            )
+            corrected.validate()
+        except ContractError:
+            corrected_ops.append(operation)
+            continue
+        corrected_ops.append(corrected)
+        changed = True
+    if not changed:
+        return plan
+    return OperatorPlan(
+        schema_version=plan.schema_version,
+        file=plan.file,
+        symbol=plan.symbol,
+        intent=plan.intent,
+        operations=tuple(corrected_ops),
+        diagnostic=plan.diagnostic,
+    )
+
+
+_CONSTANT_CONDITION_RE = re.compile(r"^\s*(True|False|0|1)\s*$")
+
+
+def _constant_condition_reason(plan: OperatorPlan) -> str | None:
+    """Reject replace_condition plans that replace a real condition with a
+    literal constant (True/False/0/1) -- a dangerous pseudo-fix (e.g. the 7B's
+    'if False:' for django-14351 that would silently disable DISTINCT)."""
+    for operation in plan.operations:
+        if operation.operator != "replace_condition":
+            continue
+        new_condition = str(operation.arguments.get("new_condition", "")).strip()
+        if _CONSTANT_CONDITION_RE.match(new_condition):
+            return "constant-condition"
+    return None
+
+
 def _correct_boundary_rewrites(task: StudentTask, plan: OperatorPlan) -> None:
     """Deterministically correct a supported boundary rewrite in place.
 
@@ -1136,6 +1262,16 @@ class OperatorPlanAdapter(StudentAdapter):
             return self._failure(task, revision, raw, reason, str(exc))
         _correct_boundary_rewrites(task, plan)
         plan = _correct_error_params_rewrites(task, plan)
+        plan = _correct_method_body_guards(task, plan)
+        constant_reason = _constant_condition_reason(plan)
+        if constant_reason is not None:
+            return self._failure(
+                task,
+                revision,
+                raw,
+                constant_reason,
+                "replacement condition must not be a literal constant",
+            )
         if revision.source_round >= 19 and re.search(
             r"\bunresolved\b", plan.diagnostic, re.IGNORECASE
         ):
@@ -1783,6 +1919,7 @@ class MlxOperatorPlanGenerator(MlxStructuredGenerator):
                     raise ContractError("operator plan changed the frozen candidates")
                 _correct_boundary_rewrites(task, plan)
                 plan = _correct_error_params_rewrites(task, plan)
+                plan = _correct_method_body_guards(task, plan)
                 if revision.source_round >= 23:
                     oracle_mismatch = _semantic_oracle_mismatch(task, plan)
                     if oracle_mismatch is not None:

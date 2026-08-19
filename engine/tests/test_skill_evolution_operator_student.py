@@ -719,3 +719,120 @@ def test_correct_error_params_rewrites_unchanged_without_sibling(
     corrected = _correct_error_params_rewrites(task, plan)
 
     assert corrected is plan
+
+
+def test_correct_method_body_guards_wraps_statement_with_class_symbol(
+    tmp_path: Path,
+) -> None:
+    """A-1: replace_method_body with a class symbol + single-if new_body whose
+    inner statement exists in one method becomes a replace_statement (gold)."""
+    from skill_evolution_loop.operator_student import (
+        _correct_method_body_guards,
+    )
+    from skill_evolution_loop.operator_rewrite import materialize_operator_plan
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "class CharField(Field):\n"
+        "    def __init__(self, *args, max_length=None, **kwargs):\n"
+        "        super().__init__(*args, **kwargs)\n"
+        "        self.max_length = max_length\n"
+        "        self.validators.append(validators.MaxLengthValidator(self.max_length))\n",
+        encoding="utf-8",
+    )
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="guard-fixture",
+        checkout=checkout,
+        instruction="Only add the max length validator when max_length is set.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    plan = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "CharField",
+            "intent": {
+                "defect": "validator added when max_length is None",
+                "trigger": "max_length unset",
+                "desired_boundary": "guard the validator",
+            },
+            "operations": [
+                {
+                    "operator": "replace_method_body",
+                    "selector": {"occurrence": 0},
+                    "arguments": {
+                        "new_body": "\n".join(
+                            [
+                                "if self.max_length is not None:",
+                                "    self.validators.append(validators.MaxLengthValidator(self.max_length))",
+                            ]
+                        )
+                    },
+                }
+            ],
+            "diagnostic": "wrap the validator append in a guard",
+        }
+    )
+    corrected = _correct_method_body_guards(task, plan)
+    op = corrected.operations[0]
+    assert op.operator == "replace_statement"
+    assert (
+        op.selector["source"]
+        == "self.validators.append(validators.MaxLengthValidator(self.max_length))"
+    )
+    source = module.read_text(encoding="utf-8")
+    result = materialize_operator_plan(source, corrected)
+    assert result.accepted is True
+    assert "if self.max_length is not None:" in result.after
+    assert "self.validators.append(validators.MaxLengthValidator(self.max_length))" in result.after
+    assert "def __init__" in result.after
+
+
+def test_constant_condition_reason_rejects_literal_conditions() -> None:
+    """A-4: replace_condition must not replace a real condition with a literal."""
+    from skill_evolution_loop.operator_student import _constant_condition_reason
+
+    bad = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "compute",
+            "intent": {
+                "defect": "x", "trigger": "y", "desired_boundary": "z",
+            },
+            "operations": [
+                {
+                    "operator": "replace_condition",
+                    "selector": {"source": "self.query.distinct", "occurrence": 0},
+                    "arguments": {"new_condition": "False"},
+                }
+            ],
+            "diagnostic": "disable distinct",
+        }
+    )
+    assert _constant_condition_reason(bad) == "constant-condition"
+
+    ok = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "compute",
+            "intent": {
+                "defect": "x", "trigger": "y", "desired_boundary": "z",
+            },
+            "operations": [
+                {
+                    "operator": "replace_condition",
+                    "selector": {"source": "self.query.distinct", "occurrence": 0},
+                    "arguments": {"new_condition": "self.query.distinct is not None"},
+                }
+            ],
+            "diagnostic": "real condition",
+        }
+    )
+    assert _constant_condition_reason(ok) is None

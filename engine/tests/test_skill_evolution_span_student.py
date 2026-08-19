@@ -2652,3 +2652,146 @@ def test_semantic_recipe_after_gate_follows_profile_recipe_chars(
     )
     assert changed is True  # profile 800 accepts it
     assert "x" * 700 in projected
+
+
+def test_diffuse_trim_family_edits_spreads_char_class_to_all_anchors(
+    tmp_path: Path,
+) -> None:
+    """A-2: a trim-only \\x00 addition spreads to trim's leading class and to
+    ltrim/rtrim's anchor classes."""
+    from skill_evolution_loop.span_rewrite import (
+        SpanBundlePlan,
+        SpanOperation,
+        SpanPlan,
+    )
+    from skill_evolution_loop.span_student import _diffuse_trim_family_edits
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    module = checkout / "src/Str.php"
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "<?php\n"
+        "class Str\n"
+        "{\n"
+        "    public static function trim($value, $charlist = null)\n"
+        "    {\n"
+        "        if ($charlist === null) {\n"
+        "            return preg_replace('~^[\\s\\x{FEFF}\\x{200B}\\x{200E}]+|[\\s\\x{FEFF}\\x{200B}\\x{200E}]+$~u', '', $value) ?? trim($value);\n"
+        "        }\n"
+        "        return trim($value, $charlist);\n"
+        "    }\n"
+        "    public static function ltrim($value, $charlist = null)\n"
+        "    {\n"
+        "        if ($charlist === null) {\n"
+        "            return preg_replace('~^[\\s\\x{FEFF}\\x{200B}\\x{200E}]+~u', '', $value) ?? ltrim($value);\n"
+        "        }\n"
+        "        return ltrim($value, $charlist);\n"
+        "    }\n"
+        "    public static function rtrim($value, $charlist = null)\n"
+        "    {\n"
+        "        if ($charlist === null) {\n"
+        "            return preg_replace('~[\\s\\x{FEFF}\\x{200B}\\x{200E}]+$~u', '', $value) ?? rtrim($value);\n"
+        "        }\n"
+        "        return rtrim($value, $charlist);\n"
+        "    }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    import subprocess as _subprocess
+    _subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
+    _subprocess.run(["git", "add", "."], cwd=checkout, check=True)
+    _subprocess.run(
+        ["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-qm", "fixture"],
+        cwd=checkout, check=True,
+    )
+    task = StudentTask.create(
+        task_id="trim-family-fixture",
+        checkout=checkout,
+        instruction="trim/ltrim/rtrim should strip NUL characters.",
+        allowed_targets=["src/Str.php"],
+        cohort="feedback",
+    )
+    before = (
+        "return preg_replace('~^[\\s\\x{FEFF}\\x{200B}\\x{200E}]+|"
+        "[\\s\\x{FEFF}\\x{200B}\\x{200E}]+$~u', '', $value) ?? trim($value);"
+    )
+    after = (
+        "return preg_replace('~^[\\s\\x{FEFF}\\x{200B}\\x{200E}]+|"
+        "[\\s\\x{FEFF}\\x{200B}\\x{200E}\\x00]+$~u', '', $value) ?? trim($value);"
+    )
+    plan = SpanPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/Str.php",
+            "intent": {
+                "defect": "NUL not stripped",
+                "trigger": "leading/trailing NUL",
+                "desired_boundary": "strip NUL everywhere",
+            },
+            "operations": [
+                {"before": before, "after": after}
+            ],
+            "diagnostic": "add NUL to trim regex",
+        }
+    )
+    bundle = SpanBundlePlan.from_plan(plan)
+    diffused = _diffuse_trim_family_edits(task, bundle)
+    assert diffused is not None
+    ops = diffused.plans[0].operations
+    assert len(ops) == 3  # trim + ltrim + rtrim
+    results = [op.after for op in ops]
+    assert "\\x00]+$~u" in results[0] or "\\x00]+|" in results[0]  # trim both anchors
+    assert any("^[\\s\\x{FEFF}\\x{200B}\\x{200E}\\x00]+~u" in r for r in results)  # ltrim
+    assert any("[\\s\\x{FEFF}\\x{200B}\\x{200E}\\x00]+$~u" in r for r in results)  # rtrim
+
+
+def test_semantic_noop_reason_rejects_comment_only_edit() -> None:
+    """A-3: appending a comment to a line (no behavior change) is a no-op."""
+    from skill_evolution_loop.span_rewrite import (
+        SpanBundlePlan,
+        SpanOperation,
+        SpanPlan,
+    )
+    from skill_evolution_loop.span_student import _semantic_noop_reason
+
+    plan = SpanPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/FunctionPrefix.php",
+            "intent": {
+                "defect": "days matched inside NETWORKDAYS",
+                "trigger": "days in prefix regex",
+                "desired_boundary": "don't convert NETWORKDAYS",
+            },
+            "operations": [
+                {
+                    "before": ". '|days'",
+                    "after": ". '|days' // Commented out to prevent conversion of NETWORK_xlfn.DAYS",
+                }
+            ],
+            "diagnostic": "stop NETWORKDAYS conversion",
+        }
+    )
+    assert _semantic_noop_reason(SpanBundlePlan.from_plan(plan)) == "semantic-noop"
+
+    # A real change with an added comment is NOT a no-op.
+    plan2 = SpanPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/FunctionPrefix.php",
+            "intent": {
+                "defect": "x",
+                "trigger": "y",
+                "desired_boundary": "z",
+            },
+            "operations": [
+                {
+                    "before": "const X = 1;",
+                    "after": "const X = 2; // fixed",
+                }
+            ],
+            "diagnostic": "real change",
+        }
+    )
+    assert _semantic_noop_reason(SpanBundlePlan.from_plan(plan2)) is None
