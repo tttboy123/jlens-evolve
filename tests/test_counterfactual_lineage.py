@@ -565,3 +565,38 @@ def test_prompt_lineage_requires_embedded_prompt_texts() -> None:
             candidate_revision_id="candidate-r1",
             candidate_bundle_sha256="a" * 64,
         )
+
+
+def test_prompt_lineage_rejects_empty_prompt_text_entries() -> None:
+    """Regression: the operator clause gate appended an empty-string prompt to
+    the trace; frozen baseline cells then carried prompt_texts with an empty
+    entry, failing 'baseline prompt evidence is missing or invalid'."""
+    from evolve.contracts import ContractViolation
+    from evolve.evidence.counterfactual import _validate_prompt_lineage
+
+    real_prompt = "SYSTEM: baseline repair\nUSER: fix it"
+    broken = {
+        "prompt_texts": [real_prompt, ""],
+        "prompt_sha256": [_sha(real_prompt), _sha("")],
+        "candidate_prompt": None,
+        "candidate_prompt_sha256": None,
+        "compiled_artifact_sha256": {},
+    }
+    with pytest.raises(ContractViolation):
+        _validate_prompt_lineage(
+            "baseline", broken,
+            candidate_revision_id="candidate-r1", candidate_bundle_sha256="a" * 64,
+        )
+
+    ok = {
+        "prompt_texts": [real_prompt],
+        "prompt_sha256": [_sha(real_prompt)],
+        "candidate_prompt": None,
+        "candidate_prompt_sha256": None,
+        "compiled_artifact_sha256": {},
+    }
+    bundle_hash, _ = _validate_prompt_lineage(
+        "baseline", ok,
+        candidate_revision_id="candidate-r1", candidate_bundle_sha256="a" * 64,
+    )
+    assert isinstance(bundle_hash, str) and bundle_hash

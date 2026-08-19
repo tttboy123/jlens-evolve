@@ -374,10 +374,10 @@ class LegacyQwenCellRunner:
                 "prompt_files": [
                     f"prompt-{index:03d}.txt"
                     for index, prompt in enumerate(prompts)
-                    if prompt is not None
+                    if prompt
                 ],
                 "prompt_texts": [
-                    prompt for prompt in prompts if prompt is not None
+                    prompt for prompt in prompts if prompt
                 ],
                 "structural_valid": attempt.structural_valid,
                 "failure_reason": attempt.failure_reason,
