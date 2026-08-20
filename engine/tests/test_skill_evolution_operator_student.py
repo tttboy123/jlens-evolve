@@ -836,3 +836,108 @@ def test_constant_condition_reason_rejects_literal_conditions() -> None:
         }
     )
     assert _constant_condition_reason(ok) is None
+
+
+def test_hash_id_anti_pattern_reason_rejects_id_hash() -> None:
+    """B-5: hash(id(...)) in a replacement is rejected (django-15315)."""
+    from skill_evolution_loop.operator_student import _hash_id_anti_pattern_reason
+
+    bad = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "Field",
+            "intent": {"defect": "x", "trigger": "y", "desired_boundary": "z"},
+            "operations": [
+                {
+                    "operator": "replace_method_body",
+                    "selector": {"occurrence": 0},
+                    "arguments": {"new_body": "return hash(id(self))"},
+                }
+            ],
+            "diagnostic": "hash by id",
+        }
+    )
+    assert _hash_id_anti_pattern_reason(bad) == "hash-id-anti-pattern"
+
+    ok = OperatorPlan.from_dict(
+        {
+            "schema_version": 1,
+            "file": "src/example.py",
+            "symbol": "Field",
+            "intent": {"defect": "x", "trigger": "y", "desired_boundary": "z"},
+            "operations": [
+                {
+                    "operator": "replace_method_body",
+                    "selector": {"occurrence": 0},
+                    "arguments": {"new_body": "return hash(self.creation_counter)"},
+                }
+            ],
+            "diagnostic": "hash by creation_counter",
+        }
+    )
+    assert _hash_id_anti_pattern_reason(ok) is None
+
+
+def test_operator_plan_too_large_counts_compact_json(tmp_path: Path) -> None:
+    """B-6: pretty-printed plan length must not trigger plan-too-large when
+    the compact JSON is within budget."""
+    from skill_evolution_loop.operator_student import (
+        MlxOperatorPlanGenerator,
+        OperatorPlanAdapter,
+    )
+
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    module = checkout / "src/example.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("def compute():\n    return 1\n", encoding="utf-8")
+    _git_init(checkout)
+    task = StudentTask.create(
+        task_id="compact-fixture",
+        checkout=checkout,
+        instruction="Bump the return value.",
+        allowed_targets=["src/example.py"],
+        cohort="feedback",
+    )
+    revision = LoopRevision.create(
+        skill_id="compact-skill",
+        revision_id="compact-r008",
+        parent_revision_id=None,
+        source_round=8,
+        protocol="python-typed-operator-plan-v1",
+        skill_text="No additional domain teaching is provided.",
+        prompt_template="Return exactly one operator plan JSON object.",
+        eval_note="fixture",
+    )
+    payload = {
+        "schema_version": 1,
+        "file": "src/example.py",
+        "symbol": "compute",
+        "intent": {"defect": "x" * 260, "trigger": "y" * 260, "desired_boundary": "z" * 260},
+        "operations": [
+            {
+                "operator": "replace_expression",
+                "selector": {"source": "1", "occurrence": 0},
+                "arguments": {"new_expression": "2"},
+            }
+        ],
+        "diagnostic": "d" * 360,
+    }
+    pretty = json.dumps(payload, indent=2)
+
+    class Tokenizer:
+        @staticmethod
+        def apply_chat_template(messages, **kwargs):
+            return "x"
+
+    generator = MlxOperatorPlanGenerator(
+        model_path="fixture-model",
+        max_tokens=512,
+        loader=lambda _p: (object(), Tokenizer()),
+        text_generator=lambda *_a, **_k: pretty,
+    )
+    adapter = OperatorPlanAdapter(generator=generator)
+    attempt = adapter.run(task, revision)
+    # compact JSON is under budget, so it must not be plan-too-large
+    assert attempt.failure_reason != "plan-too-large"

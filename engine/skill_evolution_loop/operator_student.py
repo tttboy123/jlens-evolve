@@ -1162,6 +1162,24 @@ def _constant_condition_reason(plan: OperatorPlan) -> str | None:
     return None
 
 
+_HASH_ID_ANTI_PATTERN = re.compile(r"\bhash\s*\(\s*id\s*\(")
+
+
+def _hash_id_anti_pattern_reason(plan: OperatorPlan) -> str | None:
+    """Reject plans whose replacement uses ``hash(id(...))`` (django-15315).
+
+    ``id()`` does not satisfy the ``__eq__`` hash contract (objects equal by
+    value get different hashes), so a __hash__ body built on ``id()`` is an
+    anti-pattern.  Deterministic reject + replan hint instead of emitting a
+    dangerous patch.
+    """
+    for operation in plan.operations:
+        for value in operation.arguments.values():
+            if isinstance(value, str) and _HASH_ID_ANTI_PATTERN.search(value):
+                return "hash-id-anti-pattern"
+    return None
+
+
 def _correct_boundary_rewrites(task: StudentTask, plan: OperatorPlan) -> None:
     """Deterministically correct a supported boundary rewrite in place.
 
@@ -1239,7 +1257,21 @@ class OperatorPlanAdapter(StudentAdapter):
             "max_plan_chars",
             _MAX_OPERATOR_PLAN_CHARS,
         )
-        if len(raw) > plan_limit:
+        # Count compact JSON: the model's pretty-printed output inflates the
+        # character count without adding plan complexity (django-11551 wrote
+        # 2104 pretty chars ~= 1300 compact).  Only the parsed object is
+        # bounded; unparseable output is still gated by its raw length.
+        effective_chars = len(raw)
+        try:
+            parsed_payload = json.loads(
+                _JSON_FENCE.search(raw).group(1)
+                if _JSON_FENCE.search(raw)
+                else raw[raw.find("{") : raw.rfind("}") + 1]
+            )
+            effective_chars = len(canonical_json(parsed_payload))
+        except (json.JSONDecodeError, ValueError):
+            pass
+        if effective_chars > plan_limit:
             return self._failure(
                 task,
                 revision,
@@ -1271,6 +1303,15 @@ class OperatorPlanAdapter(StudentAdapter):
                 raw,
                 constant_reason,
                 "replacement condition must not be a literal constant",
+            )
+        hash_id_reason = _hash_id_anti_pattern_reason(plan)
+        if hash_id_reason is not None:
+            return self._failure(
+                task,
+                revision,
+                raw,
+                hash_id_reason,
+                "replacement must not hash id(); use the __eq__ comparison key",
             )
         if revision.source_round >= 19 and re.search(
             r"\bunresolved\b", plan.diagnostic, re.IGNORECASE
